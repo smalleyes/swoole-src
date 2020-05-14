@@ -11,6 +11,7 @@
   | license@php.net so we can mail you a copy immediately.               |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
+  |         Twosee  <twose@qq.com>                                       |
   +----------------------------------------------------------------------+
 */
 
@@ -52,7 +53,7 @@ enum swHttp2_frame_type
     SW_HTTP2_TYPE_CONTINUATION = 9,
 };
 
-enum swHttp2FrameFlag
+enum swHttp2_frame_flag
 {
     SW_HTTP2_FLAG_NONE = 0x00,
     SW_HTTP2_FLAG_ACK = 0x01,
@@ -72,10 +73,12 @@ enum swHttp2_setting_id
     SW_HTTP2_SETTINGS_MAX_HEADER_LIST_SIZE   = 0x6,
 };
 
-enum swHttp2_stream_type
+enum swHttp2_stream_flag
 {
-    SW_HTTP2_STREAM_NORMAL      = 0,
-    SW_HTTP2_STREAM_PIPELINE    = 1,
+    SW_HTTP2_STREAM_NORMAL            = 0,
+    SW_HTTP2_STREAM_REQUEST_END       = 1 << 0,
+    SW_HTTP2_STREAM_PIPELINE_REQUEST  = 1 << 1,
+    SW_HTTP2_STREAM_PIPELINE_RESPONSE = 1 << 2,
 };
 
 #define SW_HTTP2_FRAME_HEADER_SIZE            9
@@ -144,7 +147,7 @@ static sw_inline ssize_t swHttp2_get_length(const char *buf)
 
 ssize_t swHttp2_get_frame_length(swProtocol *protocol, swSocket *conn, char *buf, uint32_t length);
 int swHttp2_send_setting_frame(swProtocol *protocol, swSocket *conn);
-char* swHttp2_get_type(int type);
+const char* swHttp2_get_type(int type);
 int swHttp2_get_type_color(int type);
 
 static sw_inline void swHttp2_init_settings(swHttp2_settings *settings)

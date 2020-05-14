@@ -1,5 +1,8 @@
-#include "tests.h"
-#include "coroutine_socket.h"
+#include "test_coroutine.h"
+#include "test_process.h"
+#include "test_server.h"
+
+using namespace swoole::test;
 
 using swoole::coroutine::Socket;
 
@@ -8,7 +11,7 @@ TEST(coroutine_socket, connect_refused)
     swoole_event_init();
     SwooleTG.reactor->wait_exit = 1;
 
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Socket sock(SW_SOCK_TCP);
         bool retval = sock.connect("127.0.0.1", 9801, 0.5);
@@ -19,7 +22,7 @@ TEST(coroutine_socket, connect_refused)
 
 TEST(coroutine_socket, connect_timeout)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Socket sock(SW_SOCK_TCP);
         sock.set_timeout(0.5);
@@ -31,7 +34,7 @@ TEST(coroutine_socket, connect_timeout)
 
 TEST(coroutine_socket, connect_with_dns)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Socket sock(SW_SOCK_TCP);
         bool retval = sock.connect("www.baidu.com", 80, 0.5);
@@ -42,10 +45,31 @@ TEST(coroutine_socket, connect_with_dns)
 
 TEST(coroutine_socket, recv_success)
 {
-    coro_test([](void *arg)
+    pid_t pid;
+
+    process proc([](process *proc)
+    {
+        on_receive_lambda_type receive_fn = [](ON_RECEIVE_PARAMS)
+        {
+            char *data_ptr = NULL;
+            size_t data_len = SERVER_THIS->get_packet(req, (char **) &data_ptr);
+
+            SERVER_THIS->send(req->info.fd, data_ptr, data_len);
+        };
+
+        server serv(TEST_HOST, TEST_PORT, SW_MODE_BASE, SW_SOCK_TCP);
+        serv.on("onReceive", (void *) receive_fn);
+        serv.start();
+    });
+
+    pid = proc.start();
+
+    sleep(1); // wait for the test server to start
+
+    test::coroutine::test([](void *arg)
     {
         Socket sock(SW_SOCK_TCP);
-        bool retval = sock.connect("127.0.0.1", 9501, -1);
+        bool retval = sock.connect(TEST_HOST, TEST_PORT, -1);
         ASSERT_EQ(retval, true);
         ASSERT_EQ(sock.errCode, 0);
         sock.send(SW_STRS("hello world\n"));
@@ -54,14 +78,34 @@ TEST(coroutine_socket, recv_success)
         buf[n] = 0;
         ASSERT_EQ(strcmp(buf, "hello world\n"), 0);
     });
+
+    kill(pid, SIGKILL);
 }
 
 TEST(coroutine_socket, recv_fail)
 {
-    coro_test([](void *arg) 
+    pid_t pid;
+
+    process proc([](process *proc)
+    {
+        on_receive_lambda_type receive_fn = [](ON_RECEIVE_PARAMS)
+        {
+            SERVER_THIS->close(req->info.fd, 0);
+        };
+
+        server serv(TEST_HOST, TEST_PORT, SW_MODE_BASE, SW_SOCK_TCP);
+        serv.on("onReceive", (void *) receive_fn);
+        serv.start();
+    });
+
+    pid = proc.start();
+
+    sleep(1); // wait for the test server to start
+
+    test::coroutine::test([](void *arg) 
     {
         Socket sock(SW_SOCK_TCP);
-        bool retval = sock.connect("127.0.0.1", 9501, -1);
+        bool retval = sock.connect(TEST_HOST, TEST_PORT, -1);
         ASSERT_EQ(retval, true);
         ASSERT_EQ(sock.errCode, 0);
         sock.send("close", 6);
@@ -69,11 +113,13 @@ TEST(coroutine_socket, recv_fail)
         int n = sock.recv(buf, sizeof(buf));
         ASSERT_EQ(n, 0);
     });
+
+    kill(pid, SIGKILL);
 }
 
 TEST(coroutine_socket, bind_success)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Socket sock(SW_SOCK_TCP);
         bool retval = sock.bind("127.0.0.1", 9909);
@@ -83,7 +129,7 @@ TEST(coroutine_socket, bind_success)
 
 TEST(coroutine_socket, bind_fail)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Socket sock(SW_SOCK_TCP);
         bool retval = sock.bind("192.111.11.1", 9909);
@@ -94,7 +140,7 @@ TEST(coroutine_socket, bind_fail)
 
 TEST(coroutine_socket, listen)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Socket sock(SW_SOCK_TCP);
         bool retval = sock.bind("127.0.0.1", 9909);
@@ -105,7 +151,7 @@ TEST(coroutine_socket, listen)
 
 TEST(coroutine_socket, accept)
 {
-    coro_test({
+    test::coroutine::test({
         [](void *arg)
         {
             Socket sock(SW_SOCK_TCP);

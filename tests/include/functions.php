@@ -1,27 +1,17 @@
 <?php
-/*
- +----------------------------------------------------------------------+
- | Swoole                                                               |
- +----------------------------------------------------------------------+
- | Copyright (c) 2012-2017 The Swoole Group                             |
- +----------------------------------------------------------------------+
- | This source file is subject to version 2.0 of the Apache license,    |
- | that is bundled with this package in the file LICENSE, and is        |
- | available through the world-wide-web at the following url:           |
- | http://www.apache.org/licenses/LICENSE-2.0.html                      |
- | If you did not receive a copy of the Apache2.0 license and are unable|
- | to obtain it through the world-wide-web, please send a note to       |
- | license@swoole.com so we can mail you a copy immediately.            |
- +----------------------------------------------------------------------+
- | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
- +----------------------------------------------------------------------+
+/**
+ * This file is part of Swoole, for internal use only
+ *
+ * @link     https://www.swoole.com
+ * @contact  team@swoole.com
+ * @license  https://github.com/swoole/library/blob/master/LICENSE
  */
 
 require_once __DIR__ . '/config.php';
 
 function switch_process()
 {
-    usleep((USE_VALGRIND ? 100 : 10) * 1000);
+    usleep((USE_VALGRIND ? 100 : 25) * 1000);
 }
 
 function clear_php()
@@ -74,29 +64,14 @@ function is_musl_libc(): bool
     return $bool;
 }
 
-function get_one_free_port()
+function get_one_free_port(): int
 {
-    $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-    if (!socket_bind($socket, "0.0.0.0", 0)) {
-        return false;
-    }
-    if (!socket_listen($socket)) {
-        return false;
-    }
-    if (!socket_getsockname($socket, $addr, $port)) {
-        return false;
-    }
-    socket_close($socket);
-    return $port;
-}
-
-function get_one_free_port_coro()
-{
-    $socket = new Co\Socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    $socket->bind('0.0.0.0');
-    $socket->listen();
-    $port = $socket->getsockname()['port'];
-    $socket->close();
+    $hookFlags = Swoole\Runtime::getHookFlags();
+    Swoole\Runtime::enableCoroutine(false);
+    $server = stream_socket_server('tcp://127.0.0.1:0');
+    $name = stream_socket_get_name($server, false);
+    $port = (parse_url($name)['port'] ?? -1) ?: -1;
+    Swoole\Runtime::enableCoroutine($hookFlags);
     return $port;
 }
 
@@ -163,47 +138,96 @@ function httpRequest(string $uri, array $options = [])
     $path = $url_info['path'] ?? null ?: '/';
     $query = $url_info['query'] ?? null ? "?{$url_info['query']}" : '';
     $port = (int)($url_info['port'] ?? null ?: 80);
-    $cli = new Swoole\Coroutine\Http\Client($domain, $port, $scheme === 'https' || $port === 443);
+    $http2 = $options['http2'] ?? false;
+    $connect_args = [$domain, $port, $scheme === 'https' || $port === 443];
+    if ($http2) {
+        $cli = new Swoole\Coroutine\Http2\Client(...$connect_args);
+        $request = new Swoole\Http2\Request;
+    } else {
+        $cli = new Swoole\Coroutine\Http\Client(...$connect_args);
+        $request = null;
+    }
     $cli->set($options + ['timeout' => 5]);
     if (isset($options['method'])) {
-        $cli->setMethod($options['method']);
+        if ($http2) {
+            $request->method = $options['method'];
+        } else {
+            $cli->setMethod($options['method']);
+        }
     }
     if (isset($options['headers'])) {
-        $cli->setHeaders($options['headers']);
+        if ($http2) {
+            $request->headers = $options['headers'];
+        } else {
+            $cli->setHeaders($options['headers']);
+        }
     }
     if (isset($options['data'])) {
-        $cli->setData($options['data']);
+        if ($http2) {
+            $request->data = $options['data'];
+        } else {
+            $cli->setData($options['data']);
+        }
     }
     if (is_array($options['download'] ?? null)) {
+        if ($http2) {
+            throw new RuntimeException('HTTP2 not support download');
+        }
         $cli->download(...array_values($options['download']));
         return $cli;
     }
-    $redirect_times = $options['redirect'] ?? 3;
-    while (true) {
-        $cli->execute($path . $query);
-        if ($redirect_times-- && ($cli->headers['location'] ?? null) && $cli->headers['location'][0] === '/') {
-            $path = $cli->headers['location'];
-            $query = '';
-            continue;
+    if ($http2) {
+        if (!$cli->connect()) {
+            throw new RuntimeException("HTTP2 connect {$domain}:{$port} failed: {$cli->errMsg}");
         }
-        break;
+        $request->path = "{$path}{$query}";
+        if (!$cli->send($request)) {
+            throw new RuntimeException("HTTP2 send request to {$uri} failed: {$cli->errMsg}");
+        }
+        if (!($response = $cli->recv())) {
+            throw new RuntimeException("HTTP2 recv from {$uri} failed: {$cli->errMsg}");
+        }
+        return [
+            'statusCode' => $response->statusCode,
+            'headers' => $response->headers,
+            'set_cookie_headers' => $response->set_cookie_headers,
+            'body' => $response->data
+        ];
+    } else {
+        $redirect_times = $options['redirect'] ?? 3;
+        while (true) {
+            if (!$cli->execute($path . $query)) {
+                throw new RuntimeException("HTTP execute {$uri} failed: {$cli->errMsg}");
+            }
+            if ($redirect_times-- && ($cli->headers['location'] ?? null) && $cli->headers['location'][0] === '/') {
+                $path = $cli->headers['location'];
+                $query = '';
+                continue;
+            }
+            break;
+        }
+        return [
+            'statusCode' => $cli->statusCode,
+            'headers' => $cli->headers,
+            'set_cookie_headers' => $cli->set_cookie_headers,
+            'body' => $cli->body
+        ];
     }
-    return $cli;
 }
 
 function httpGetStatusCode(string $uri, array $options = [])
 {
-    return httpRequest($uri, $options)->statusCode;
+    return httpRequest($uri, $options)['statusCode'];
 }
 
 function httpGetHeaders(string $uri, array $options = [])
 {
-    return httpRequest($uri, $options)->headers;
+    return httpRequest($uri, $options)['headers'];
 }
 
 function httpGetBody(string $uri, array $options = [])
 {
-    return httpRequest($uri, $options)->body;
+    return httpRequest($uri, $options)['body'];
 }
 
 function content_hook_replace(string $content, array $kv_map): string
@@ -488,19 +512,9 @@ function arrayEqual(array $a, array $b, $strict = true)
     }
 }
 
-function check_tcp_port($ip, $port)
+function check_tcp_port(string $host, int $port): bool
 {
-    $sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-    socket_set_nonblock($sock);
-    socket_connect($sock, $ip, $port);
-    socket_set_block($sock);
-    $r = [$sock];
-    $w = [$sock];
-    $f = [$sock];
-    $status = socket_select($r, $w, $f, 5);
-    socket_close($sock);
-
-    return $status;
+    return !!@fsockopen($host, $port);
 }
 
 function start_server($file, $host, $port, $redirect_file = "/dev/null", $ext1 = null, $ext2 = null, $debug = false)
@@ -543,12 +557,12 @@ function start_server($file, $host, $port, $redirect_file = "/dev/null", $ext1 =
             fclose($fp);
         }
     }
-// linux上有问题，client端事件循环还没起起来就会先调用这个shutdown回调, 结束了子进程
-// 第二个shutdown_function swoole才会把子进程的事件循环起来
-//    register_shutdown_function(function() use($handle, $redirect_file) {
-//        proc_terminate($handle, SIGTERM);
-//        @unlink($redirect_file);
-//    });
+    // linux上有问题，client端事件循环还没起起来就会先调用这个shutdown回调, 结束了子进程
+    // 第二个shutdown_function swoole才会把子进程的事件循环起来
+    //    register_shutdown_function(function() use($handle, $redirect_file) {
+    //        proc_terminate($handle, SIGTERM);
+    //        @unlink($redirect_file);
+    //    });
     swoole_async_set(['enable_coroutine' => false]); // need use exit
     return function () use ($handle, $redirect_file) {
         // @unlink($redirect_file);
@@ -628,25 +642,31 @@ function spawn_exec($cmd, $input = null, $tv_sec = null, $tv_usec = null, $cwd =
         restore_error_handler();
         if ($n === false) {
             break;
-        } else if ($n === 0) {
-            // 超时kill -9
-            assert(proc_terminate($proc, SIGKILL));
-            throw new \RuntimeException("exec $cmd time out");
-        } else if ($n > 0) {
-            foreach ($r as $handle) {
-                if ($handle === $pipes[1]) {
-                    $_ = &$out;
-                } else if ($handle === $pipes[2]) {
-                    $_ = &$err;
-                } else {
-                    $_ = "";
-                }
-                $line = fread($handle, 8192);
-                $isEOF = $line === "";
-                if ($isEOF) {
-                    break 2;
-                } else {
-                    $_ .= $line;
+        } else {
+            if ($n === 0) {
+                // 超时kill -9
+                assert(proc_terminate($proc, SIGKILL));
+                throw new \RuntimeException("exec $cmd time out");
+            } else {
+                if ($n > 0) {
+                    foreach ($r as $handle) {
+                        if ($handle === $pipes[1]) {
+                            $_ = &$out;
+                        } else {
+                            if ($handle === $pipes[2]) {
+                                $_ = &$err;
+                            } else {
+                                $_ = "";
+                            }
+                        }
+                        $line = fread($handle, 8192);
+                        $isEOF = $line === "";
+                        if ($isEOF) {
+                            break 2;
+                        } else {
+                            $_ .= $line;
+                        }
+                    }
                 }
             }
         }
@@ -686,4 +706,15 @@ function readfile_with_lock($file)
     }
     fclose($fp);
     return $data;
+}
+
+function dump_to_file($file, $data)
+{
+    $fp = fopen($file, "w+");
+    $out = bin2hex($data);
+    $lines = str_split($out, 160);
+    foreach ($lines as $l) {
+        fwrite($fp, $l . "\n");
+    }
+    fclose($fp);
 }

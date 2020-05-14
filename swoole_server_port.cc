@@ -14,7 +14,7 @@
   +----------------------------------------------------------------------+
  */
 
-#include "php_swoole_cxx.h"
+#include "swoole_server.h"
 
 using namespace std;
 using namespace swoole;
@@ -120,7 +120,7 @@ static void php_swoole_server_port_free_object(zend_object *object)
 
 static zend_object *php_swoole_server_port_create_object(zend_class_entry *ce)
 {
-    server_port_t *server_port = (server_port_t *) ecalloc(1, sizeof(server_port_t) + zend_object_properties_size(ce));
+    server_port_t *server_port = (server_port_t *) zend_object_alloc(sizeof(server_port_t), ce);
     zend_object_std_init(&server_port->std, ce);
     object_properties_init(&server_port->std, ce);
     server_port->std.handlers = &swoole_server_port_handlers;
@@ -350,15 +350,14 @@ static PHP_METHOD(swoole_server_port, set)
         port->protocol.package_eof_len = str_v.len();
         if (port->protocol.package_eof_len == 0)
         {
-            php_swoole_fatal_error(E_ERROR, "pacakge_eof cannot be an empty string");
+            php_swoole_fatal_error(E_ERROR, "package_eof cannot be an empty string");
             RETURN_FALSE;
         }
         else if (port->protocol.package_eof_len > SW_DATA_EOF_MAXLEN)
         {
-            php_swoole_fatal_error(E_ERROR, "pacakge_eof max length is %d", SW_DATA_EOF_MAXLEN);
+            php_swoole_fatal_error(E_ERROR, "package_eof max length is %d", SW_DATA_EOF_MAXLEN);
             RETURN_FALSE;
         }
-        bzero(port->protocol.package_eof, SW_DATA_EOF_MAXLEN);
         memcpy(port->protocol.package_eof, str_v.val(), str_v.len());
     }
     //http_protocol
@@ -473,7 +472,7 @@ static PHP_METHOD(swoole_server_port, set)
     //length function
     if (php_swoole_array_get_value(vht, "package_length_func", ztmp))
     {
-        while(1)
+        while (1)
         {
             if (Z_TYPE_P(ztmp) == IS_STRING)
             {
@@ -702,7 +701,7 @@ static PHP_METHOD(swoole_server_port, on)
 
     for (i = 0; i < PHP_SWOOLE_SERVER_PORT_CALLBACK_NUM; i++)
     {
-        if (strncasecmp(callback_name[i], name, len) != 0)
+        if (!swoole_strcaseeq(name, len, callback_name[i], strlen(callback_name[i])))
         {
             continue;
         }
@@ -782,7 +781,7 @@ static PHP_METHOD(swoole_server_port, getCallback)
 static PHP_METHOD(swoole_server_port, getSocket)
 {
     swListenPort *port = php_swoole_server_port_get_and_check_ptr(ZEND_THIS);
-    php_socket *socket_object = swoole_convert_to_socket(port->sock);
+    php_socket *socket_object = swoole_convert_to_socket(port->socket->fd);
     if (!socket_object)
     {
         RETURN_FALSE;

@@ -1,5 +1,4 @@
-#include "swoole.h"
-#include "server.h"
+#include "tests.h"
 
 namespace swoole_test
 {
@@ -98,8 +97,8 @@ int my_onReceive(swServer *serv, swEventData *req)
     swConnection *conn = swWorker_get_connection(serv, req->info.fd);
     swoole_rtrim(req->data, req->info.len);
     printf("onReceive[%d]: ip=%s|port=%d Data=%s|Len=%d\n", g_receive_count, 
-            swConnection_get_ip(conn->socket_type, &conn->info),
-            swConnection_get_port(conn->socket_type, &conn->info),
+            swSocket_get_ip(conn->socket_type, &conn->info),
+            swSocket_get_port(conn->socket_type, &conn->info),
             req->data, req->info.len);
 
     int n = snprintf(resp_data, SW_IPC_BUFFER_SIZE, "Server: %.*s\n", req->info.len, req->data);
@@ -119,7 +118,7 @@ int my_onPacket(swServer *serv, swEventData *req)
 {
     int serv_sock = req->info.server_fd;
     char *data;
-    swWorker_get_data(serv, req, &data);
+    serv->get_packet(serv, req, &data);
     swDgramPacket *packet = (swDgramPacket *) data;
 
     int length;

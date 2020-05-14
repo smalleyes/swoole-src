@@ -1,15 +1,14 @@
-#include "tests.h"
-
-#include "coroutine_channel.h"
+#include "test_coroutine.h"
 
 using swoole::coroutine::Channel;
 
 using namespace swoole;
 using namespace std;
+using namespace swoole::test;
 
 TEST(coroutine_channel, push_pop)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Channel chan(1);
         int i = 1;
@@ -25,16 +24,16 @@ TEST(coroutine_channel, push_yield)
 {
     Channel chan(1);
 
-    coro_test({
+    test::coroutine::test({
         make_pair([](void *arg)
         {
             auto chan = (Channel *) arg;
             int i = 1;
             bool ret;
 
-            ret = chan->push(&i);
+            ret = chan->push(new int(i));
             ASSERT_TRUE(ret);
-            ret = chan->push(&i);
+            ret = chan->push(new int(i));
             ASSERT_TRUE(ret);
         }, &chan),
 
@@ -51,7 +50,7 @@ TEST(coroutine_channel, pop_yield)
 {
     Channel chan(1);
 
-    coro_test({
+    test::coroutine::test({
         make_pair([](void *arg)
         {
             auto chan = (Channel *) arg;
@@ -76,7 +75,7 @@ TEST(coroutine_channel, pop_yield)
 
 TEST(coroutine_channel, push_timeout)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Channel chan(1);
         bool ret;
@@ -90,7 +89,7 @@ TEST(coroutine_channel, push_timeout)
 
 TEST(coroutine_channel, pop_timeout)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
         Channel chan(1);
         void *ret;

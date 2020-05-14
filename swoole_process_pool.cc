@@ -125,7 +125,7 @@ static void php_swoole_process_pool_free_object(zend_object *object)
 
 static zend_object *php_swoole_process_pool_create_object(zend_class_entry *ce)
 {
-    process_pool_t *process_pool = (process_pool_t *) ecalloc(1, sizeof(process_pool_t) + zend_object_properties_size(ce));
+    process_pool_t *process_pool = (process_pool_t *) zend_object_alloc(sizeof(process_pool_t), ce);
     zend_object_std_init(&process_pool->std, ce);
     object_properties_init(&process_pool->std, ce);
     process_pool->std.handlers = &swoole_process_pool_handlers;
@@ -347,7 +347,7 @@ static PHP_METHOD(swoole_process_pool, __construct)
     {
         if (ipc_type > 0)
         {
-            if (swProcessPool_set_protocol(pool, 0, SW_BUFFER_INPUT_SIZE) < 0)
+            if (swProcessPool_set_protocol(pool, 0, SW_INPUT_BUFFER_SIZE) < 0)
             {
                 zend_throw_exception_ex(swoole_exception_ce, errno, "failed to create process pool");
                 RETURN_FALSE;
@@ -404,7 +404,7 @@ static PHP_METHOD(swoole_process_pool, on)
 
     process_pool_property *pp = php_swoole_process_pool_get_and_check_pp(ZEND_THIS);
 
-    if (strncasecmp("WorkerStart", name, l_name) == 0)
+    if (SW_STRCASEEQ(name, l_name, "WorkerStart"))
     {
         if (pp->onWorkerStart)
         {
@@ -419,7 +419,7 @@ static PHP_METHOD(swoole_process_pool, on)
         sw_zend_fci_cache_persist(pp->onWorkerStart);
         RETURN_TRUE;
     }
-    else if (strncasecmp("Message", name, l_name) == 0)
+    else if (SW_STRCASEEQ(name, l_name, "Message"))
     {
         if (pp->enable_coroutine)
         {
@@ -444,7 +444,7 @@ static PHP_METHOD(swoole_process_pool, on)
         sw_zend_fci_cache_persist(pp->onMessage);
         RETURN_TRUE;
     }
-    else if (strncasecmp("WorkerStop", name, l_name) == 0)
+    else if (SW_STRCASEEQ(name, l_name, "WorkerStop"))
     {
         if (pp->onWorkerStop)
         {
@@ -459,7 +459,7 @@ static PHP_METHOD(swoole_process_pool, on)
         sw_zend_fci_cache_persist(pp->onWorkerStop);
         RETURN_TRUE;
     }
-    else if (strncasecmp("Start", name, l_name) == 0)
+    else if (SW_STRCASEEQ(name, l_name, "Start"))
     {
         if (pp->onStart)
         {
@@ -507,10 +507,9 @@ static PHP_METHOD(swoole_process_pool, listen)
         RETURN_FALSE;
     }
 
-    SwooleG.reuse_port = 0;
     int ret;
     //unix socket
-    if (strncasecmp("unix:/", host, 6) == 0)
+    if (SW_STRCASECT(host, l_host, "unix:/"))
     {
         ret = swProcessPool_create_unix_socket(pool, host + 5, backlog);
     }
@@ -518,6 +517,11 @@ static PHP_METHOD(swoole_process_pool, listen)
     {
         ret = swProcessPool_create_tcp_socket(pool, host, port, backlog);
     }
+
+    swoole_fcntl_set_option(pool->stream->socket->fd, 0, 1);
+    pool->stream->socket->nonblock = 0;
+    pool->stream->socket->cloexec = 1;
+
     SW_CHECK_RETURN(ret);
 }
 
@@ -553,10 +557,7 @@ static PHP_METHOD(swoole_process_pool, start)
         RETURN_FALSE;
     }
 
-    if (SwooleTG.reactor)
-    {
-        swoole_event_free();
-    }
+    swoole_event_free();
 
     process_pool_property *pp = php_swoole_process_pool_get_and_check_pp(ZEND_THIS);
 
@@ -657,17 +658,17 @@ static PHP_METHOD(swoole_process_pool, getProcess)
             //current process
             if (worker->id == SwooleWG.id)
             {
-                worker->pipe = worker->pipe_worker;
+                worker->pipe_current = worker->pipe_worker;
             }
             else
             {
-                worker->pipe = worker->pipe_master;
+                worker->pipe_current = worker->pipe_master;
             }
             /**
              * Forbidden to close pipe in the php layer
              */
             worker->pipe_object = nullptr;
-            zend_update_property_long(swoole_process_ce, zprocess, ZEND_STRL("pipe"), worker->pipe);
+            zend_update_property_long(swoole_process_ce, zprocess, ZEND_STRL("pipe"), worker->pipe_current->fd);
         }
         php_swoole_process_set_worker(zprocess, worker);
         process_pool_property *pp = php_swoole_process_pool_get_and_check_pp(ZEND_THIS);

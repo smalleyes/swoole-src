@@ -11,18 +11,20 @@
   | license@swoole.com so we can mail you a copy immediately.            |
   +----------------------------------------------------------------------+
   | Author: Tianfeng Han  <mikan.tenny@gmail.com>                        |
+  |         Twosee  <twose@qq.com>                                       |
   +----------------------------------------------------------------------+
 */
 
 #pragma once
 
 #include "coroutine.h"
-#include "connection.h"
+#include "ssl.h"
 #include "socks5.h"
 
 #include <vector>
 #include <string>
 
+#define SW_DEFAULT_SOCKET_DNS_TIMEOUT       -1
 #define SW_DEFAULT_SOCKET_CONNECT_TIMEOUT    1
 #define SW_DEFAULT_SOCKET_READ_TIMEOUT      -1
 #define SW_DEFAULT_SOCKET_WRITE_TIMEOUT     -1
@@ -31,16 +33,17 @@ namespace swoole
 {
 enum swTimeout_type
 {
-    SW_TIMEOUT_CONNECT = 1u << 1,
-    SW_TIMEOUT_READ = 1u << 2,
-    SW_TIMEOUT_WRITE = 1u << 3,
+    SW_TIMEOUT_DNS = 1 << 0,
+    SW_TIMEOUT_CONNECT = 1 << 1,
+    SW_TIMEOUT_READ = 1 << 2,
+    SW_TIMEOUT_WRITE = 1 << 3,
     SW_TIMEOUT_RDWR = SW_TIMEOUT_READ | SW_TIMEOUT_WRITE,
-    SW_TIMEOUT_ALL = 0xff,
+    SW_TIMEOUT_ALL = SW_TIMEOUT_DNS | SW_TIMEOUT_CONNECT | SW_TIMEOUT_RDWR,
 };
 
-static constexpr enum swTimeout_type swTimeout_type_list[3] =
+static constexpr enum swTimeout_type swTimeout_type_list[] =
 {
-    SW_TIMEOUT_CONNECT, SW_TIMEOUT_READ, SW_TIMEOUT_WRITE
+    SW_TIMEOUT_DNS, SW_TIMEOUT_CONNECT, SW_TIMEOUT_READ, SW_TIMEOUT_WRITE
 };
 }
 
@@ -49,6 +52,7 @@ namespace swoole { namespace coroutine {
 class Socket
 {
 public:
+    static double default_dns_timeout;
     static double default_connect_timeout;
     static double default_read_timeout;
     static double default_write_timeout;
@@ -56,24 +60,26 @@ public:
     swSocket *socket = nullptr;
     int errCode = 0;
     const char *errMsg = "";
+    std::string errString;
 
     bool open_length_check = false;
     bool open_eof_check = false;
     bool http2 = false;
 
-    swProtocol protocol = {0};
+    swProtocol protocol = {};
     struct _swSocks5 *socks5_proxy = nullptr;
     struct _http_proxy* http_proxy = nullptr;
 
 #ifdef SW_USE_OPENSSL
     bool open_ssl = false;
-    swSSL_option ssl_option = {0};
+    swSSL_option ssl_option = {};
 #endif
 
     Socket(int domain, int type, int protocol);
     Socket(int _fd, int _domain, int _type, int _protocol);
     Socket(enum swSocket_type type = SW_SOCK_TCP);
     Socket(int _fd, enum swSocket_type _type);
+    Socket(swSocket *sock, Socket *socket);
     ~Socket();
     bool connect(std::string host, int port, int flags = 0);
     bool connect(const struct sockaddr *addr, socklen_t addrlen);
@@ -102,14 +108,14 @@ public:
     bool bind(std::string address, int port = 0);
     bool listen(int backlog = 0);
     bool sendfile(const char *filename, off_t offset, size_t length);
-    ssize_t sendto(const char *address, int port, const void *__buf, size_t __n);
+    ssize_t sendto(const std::string &host, int port, const void *__buf, size_t __n);
     ssize_t recvfrom(void *__buf, size_t __n);
     ssize_t recvfrom(void *__buf, size_t __n, struct sockaddr *_addr, socklen_t *_socklen);
 #ifdef SW_USE_OPENSSL
-    bool ssl_handshake();
-    int ssl_verify(bool allow_self_signed);
-    bool ssl_accept();
     bool ssl_check_context();
+    bool ssl_handshake();
+    bool ssl_verify(bool allow_self_signed);
+    std::string ssl_get_peer_cert();
 #endif
 
     static inline enum swSocket_type convert_to_type(int domain, int type, int protocol = 0)
@@ -182,8 +188,8 @@ public:
         return bind_port;
     }
 
-    bool getsockname();
-    bool getpeername();
+    bool getsockname(swSocketAddress *sa);
+    bool getpeername(swSocketAddress *sa);
     const char* get_ip();
     int get_port();
 
@@ -246,12 +252,24 @@ public:
         errMsg = s;
     }
 
+
+    inline void set_err(int e, std::string s)
+    {
+        errCode = errno = e;
+        errString = s;
+        errMsg = errString.c_str();
+    }
+
     /* set connect read write timeout */
     inline void set_timeout(double timeout, int type = SW_TIMEOUT_ALL)
     {
         if (timeout == 0)
         {
             return;
+        }
+        if (type & SW_TIMEOUT_DNS)
+        {
+            dns_timeout = timeout;
         }
         if (type & SW_TIMEOUT_CONNECT)
         {
@@ -275,7 +293,11 @@ public:
     inline double get_timeout(enum swTimeout_type type = SW_TIMEOUT_ALL)
     {
         SW_ASSERT_1BYTE(type);
-        if (type == SW_TIMEOUT_CONNECT)
+        if (type == SW_TIMEOUT_DNS)
+        {
+            return dns_timeout;
+        }
+        else if (type == SW_TIMEOUT_CONNECT)
         {
             return connect_timeout;
         }
@@ -320,7 +342,7 @@ public:
 #ifdef SW_USE_OPENSSL
     inline bool is_ssl_enable()
     {
-        return socket && socket->ssl != NULL;
+        return socket && ssl_handshaked;
     }
 
     bool ssl_shutdown();
@@ -346,6 +368,7 @@ private:
     int bind_port = 0;
     int backlog = 0;
 
+    double dns_timeout = default_dns_timeout;
     double connect_timeout = default_connect_timeout;
     double read_timeout = default_read_timeout;
     double write_timeout = default_write_timeout;
@@ -354,11 +377,14 @@ private:
 
     swString *read_buffer = nullptr;
     swString *write_buffer = nullptr;
-    swSocketAddress bind_address_info = {{}, 0};
+    swSocketAddress bind_address_info = {};
 
 #ifdef SW_USE_OPENSSL
-    std::string ssl_host_name;
+    bool ssl_is_server = false;
+    bool ssl_handshaked = false;
     SSL_CTX *ssl_context = nullptr;
+    std::string ssl_host_name;
+    bool ssl_create(SSL_CTX *ssl_context);
 #endif
 
     bool activated = true;
@@ -371,10 +397,10 @@ private:
     static int writable_event_callback(swReactor *reactor, swEvent *event);
     static int error_event_callback(swReactor *reactor, swEvent *event);
 
-    Socket(int _fd, swSocketAddress *addr, Socket *socket);
     inline void init_sock_type(enum swSocket_type _type);
     inline bool init_sock();
-    void init_reactor_socket(int fd);
+    bool init_reactor_socket(int fd);
+
     inline void init_options()
     {
         if (type == SW_SOCK_TCP || type == SW_SOCK_TCP6)
@@ -383,8 +409,9 @@ private:
         }
         protocol.package_length_type = 'N';
         protocol.package_length_size = 4;
+        protocol.package_length_offset = 0;
         protocol.package_body_offset = 0;
-        protocol.package_max_length = SW_BUFFER_INPUT_SIZE;
+        protocol.package_max_length = SW_INPUT_BUFFER_SIZE;
     }
 
     bool add_event(const enum swEvent_type event);
@@ -495,7 +522,7 @@ public:
         Socket *socket_;
         double timeout;
         enum swTimeout_type type;
-        double original_timeout[sizeof(swTimeout_type_list)] = {0};
+        double original_timeout[sizeof(swTimeout_type_list)] = {};
     };
 
     class timeout_controller: public timeout_setter

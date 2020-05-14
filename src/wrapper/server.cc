@@ -174,7 +174,7 @@ static DataBuffer get_recv_data(swServer *serv, swEventData *req, char *header, 
 {
     char *data_ptr = NULL;
     DataBuffer retval;
-    size_t data_len = swWorker_get_data(serv, req, &data_ptr);
+    size_t data_len = serv->get_packet(serv, req, &data_ptr);
 
     if (header_length >= (uint32_t) data_len)
     {
@@ -462,7 +462,7 @@ int Server::_onPacket(swServer *serv, swEventData *req)
     swDgramPacket *packet;
 
     char *buffer;
-    swWorker_get_data(serv, req, &buffer);
+    serv->get_packet(serv, req, &buffer);
     packet = (swDgramPacket *) buffer;
 
     char *data = NULL;
@@ -474,7 +474,7 @@ int Server::_onPacket(swServer *serv, swEventData *req)
 
     if (packet->socket_type == SW_SOCK_UDP)
     {
-        inet_ntop(AF_INET6, &packet->socket_addr.addr.inet_v4.sin_addr, clientInfo.address, sizeof(clientInfo.address));
+        inet_ntop(AF_INET, &packet->socket_addr.addr.inet_v4.sin_addr, clientInfo.address, sizeof(clientInfo.address));
         clientInfo.port = ntohs(packet->socket_addr.addr.inet_v4.sin_port);
     }
     else if (packet->socket_type == SW_SOCK_UDP6)
@@ -570,11 +570,10 @@ DataBuffer Server::taskwait(const DataBuffer &data, double timeout, int dst_work
     swEventData *task_result = &(serv.task_result[SwooleWG.id]);
     bzero(task_result, sizeof(swEventData));
     swPipe *task_notify_pipe = &serv.task_notify[SwooleWG.id];
-    int efd = task_notify_pipe->getFd(task_notify_pipe, 0);
+    swSocket *task_notify_socket = task_notify_pipe->getSocket(task_notify_pipe, 0);
 
     //clear history task
-    while (read(efd, &notify, sizeof(notify)) > 0)
-        ;
+    while (read(task_notify_socket->fd, &notify, sizeof(notify)) > 0) {}
 
     if (swProcessPool_dispatch_blocking(&serv.gs->task_workers, &buf, &dst_worker_id) >= 0)
     {
@@ -634,9 +633,8 @@ map<int, DataBuffer> Server::taskWaitMulti(const vector<DataBuffer> &tasks, doub
     worker->lock.unlock(&worker->lock);
 
     //clear history task
-    int efd = task_notify_pipe->getFd(task_notify_pipe, 0);
-    while (read(efd, &notify, sizeof(notify)) > 0)
-        ;
+    swSocket *task_notify_socket = task_notify_pipe->getSocket(task_notify_pipe, 0);
+    while (read(task_notify_socket->fd, &notify, sizeof(notify)) > 0) {}
 
     for (auto task = tasks.begin(); task != tasks.end();)
     {

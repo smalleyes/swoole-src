@@ -35,7 +35,7 @@
 #ifdef HAVE_MALLOC_TRIM
 #define SW_USE_MALLOC_TRIM         1
 #endif
-#define SW_MALLOC_TRIM_INTERVAL    1
+#define SW_MALLOC_TRIM_INTERVAL    60
 #define SW_MALLOC_TRIM_PAD         0
 #define SW_USE_MONOTONIC_TIME      1
 
@@ -48,8 +48,9 @@
 #else
 #define SW_SOCKET_BUFFER_SIZE      8388608
 #endif
-#define SW_SOCKET_SEND_TIMEOUT     1.0
+#define SW_SOCKET_SEND_TIMEOUT     60.0
 #define SW_SOCKET_ARRAY_INIT_SIZE  1024
+#define SW_SOCKET_SYNC_SEND_RETRY_COUNT  10
 
 #define SW_SYSTEMD_FDS_START       3
 
@@ -109,12 +110,15 @@
 #define SW_WORKER_USE_SIGNALFD           1
 #define SW_WORKER_MAX_WAIT_TIME          3
 #define SW_WORKER_MIN_REQUEST            10
+#define SW_WORKER_MAX_RECV_CHUNK_COUNT   32
 
 #define SW_REACTOR_MAXEVENTS             4096
 #define SW_SESSION_LIST_SIZE             (1*1024*1024)
 
 #define SW_MSGMAX                        65536
 #define SW_UNIXSOCK_MAX_BUF_SIZE         (2*1024*1024)
+
+#define SW_DGRAM_HEADER_SIZE                32
 
 /**
  * The maximum number of Reactor threads
@@ -140,8 +144,8 @@
 /**
  * ringbuffer memory pool size
  */
-#define SW_BUFFER_OUTPUT_SIZE            (2*1024*1024)
-#define SW_BUFFER_INPUT_SIZE             (2*1024*1024)
+#define SW_OUTPUT_BUFFER_SIZE            (2*1024*1024)
+#define SW_INPUT_BUFFER_SIZE             (2*1024*1024)
 #define SW_BUFFER_MIN_SIZE               65536
 #define SW_SEND_BUFFER_SIZE              65536
 
@@ -169,7 +173,7 @@
 
 #define SW_SSL_BUFFER_SIZE               16384
 #define SW_SSL_CIPHER_LIST               "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH"
-#define SW_SSL_ECDH_CURVE                "secp384r1"
+#define SW_SSL_ECDH_CURVE                "auto"
 #define SW_SSL_NPN_ADVERTISE             "\x08http/1.1"
 #define SW_SSL_HTTP2_NPN_ADVERTISE       "\x02h2"
 
@@ -198,22 +202,21 @@
 #define SW_HTTP_RESPONSE_INIT_SIZE       65536
 #define SW_HTTP_HEADER_MAX_SIZE          65536
 #define SW_HTTP_HEADER_KEY_SIZE          128
-#define SW_HTTP_HEADER_VALUE_SIZE        4096
-#define SW_HTTP_HEADER_BUFFER_SIZE       128
 #define SW_HTTP_UPLOAD_TMPDIR_SIZE       256
 #define SW_HTTP_DATE_FORMAT              "D, d M Y H:i:s T"
 #define SW_HTTP_RFC1123_DATE_GMT         "%a, %d %b %Y %T GMT"
 #define SW_HTTP_RFC1123_DATE_UTC         "%a, %d %b %Y %T UTC"
 #define SW_HTTP_RFC850_DATE              "%A, %d-%b-%y %T GMT"
 #define SW_HTTP_ASCTIME_DATE             "%a %b %e %T %Y"
-// #define SW_HTTP_100_CONTINUE
 #define SW_HTTP_SEND_TWICE               1
 
-#define SW_HTTP_BAD_REQUEST_PACKET         "HTTP/1.1 400 Bad Request\r\n\r\n"
-#define SW_HTTP_SERVICE_UNAVAILABLE_PACKET "HTTP/1.1 503 Service Unavailable\r\n\r\n"
-#define SW_HTTP_BAD_REQUEST_TOO_LARGE      "HTTP/1.1 413 Request Entity Too Large\r\n\r\n"
-#define SW_HTTP_PAGE_400                   "<html><body><h2>HTTP 400 Bad Request</h2><hr><i>Powered by Swoole</i></body></html>"
-#define SW_HTTP_PAGE_404                   "<html><body><h2>HTTP 404 Not Found</h2><hr><i>Powered by Swoole</i></body></html>"
+// #define SW_HTTP_100_CONTINUE
+#define SW_HTTP_100_CONTINUE_PACKET                "HTTP/1.1 100 Continue\r\n\r\n"
+#define SW_HTTP_BAD_REQUEST_PACKET                 "HTTP/1.1 400 Bad Request\r\n\r\n"
+#define SW_HTTP_REQUEST_ENTITY_TOO_LARGE_PACKET    "HTTP/1.1 413 Request Entity Too Large\r\n\r\n"
+#define SW_HTTP_SERVICE_UNAVAILABLE_PACKET         "HTTP/1.1 503 Service Unavailable\r\n\r\n"
+#define SW_HTTP_PAGE_400                           "<html><body><h2>HTTP 400 Bad Request</h2><hr><i>Powered by Swoole</i></body></html>"
+#define SW_HTTP_PAGE_404                           "<html><body><h2>HTTP 404 Not Found</h2><hr><i>Powered by Swoole</i></body></html>"
 
 /**
  * HTTP2 Protocol

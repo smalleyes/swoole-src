@@ -16,8 +16,9 @@
  +----------------------------------------------------------------------+
  */
 
-#include "swoole.h"
-#include "connection.h"
+#include "swoole_cxx.h"
+
+using namespace swoole;
 
 /**
  * return the package total length
@@ -41,8 +42,8 @@ ssize_t swProtocol_get_package_length(swProtocol *protocol, swSocket *conn, char
     if (body_length < 0)
     {
         swWarn("invalid package, remote_addr=%s:%d, length=%d, size=%d",
-                swConnection_get_ip(conn->socket_type, &conn->info),
-                swConnection_get_port(conn->socket_type, &conn->info), body_length, size);
+                swSocket_get_ip(conn->socket_type, &conn->info),
+                swSocket_get_port(conn->socket_type, &conn->info), body_length, size);
         return SW_ERR;
     }
     swDebug("length=%d", protocol->package_body_offset + body_length);
@@ -52,61 +53,58 @@ ssize_t swProtocol_get_package_length(swProtocol *protocol, swSocket *conn, char
 
 static sw_inline int swProtocol_split_package_by_eof(swProtocol *protocol, swSocket *conn, swString *buffer)
 {
-#ifdef SW_LOG_TRACE_OPEN
-    static int count;
-    count++;
-#endif
-
-    int eof_pos;
-    _find_eof:
     if (buffer->length < protocol->package_eof_len)
     {
         return SW_CONTINUE;
     }
-    else if (buffer->length - buffer->offset < protocol->package_eof_len)
-    {
-        eof_pos = -1;
-    }
-    else
-    {
-        eof_pos = swoole_strnpos(buffer->str + buffer->offset, buffer->length - buffer->offset, protocol->package_eof, protocol->package_eof_len);
-    }
 
-    swTraceLog(SW_TRACE_EOF_PROTOCOL, "#[0] count=%d, length=%ld, size=%ld, offset=%ld", count, buffer->length, buffer->size, (long)buffer->offset);
+    int retval;
 
-    //waiting for more data
-    if (eof_pos < 0)
-    {
-        buffer->offset = buffer->length - protocol->package_eof_len;
-        return SW_CONTINUE;
-    }
+    size_t n = string_split(buffer, protocol->package_eof, protocol->package_eof_len, [&](char *data, size_t length) -> int {
+        if (protocol->onPackage(protocol, conn, data, length) < 0)
+        {
+            retval = SW_CLOSE;
+            return false;
+        }
+        if (conn->removed)
+        {
+            return false;
+        }
+        return true;
+    });
 
-    uint32_t length = buffer->offset + eof_pos + protocol->package_eof_len;
-    swTraceLog(SW_TRACE_EOF_PROTOCOL, "#[4] count=%d, length=%d", count, length);
-    if (protocol->onPackage(protocol, conn, buffer->str, length) < 0)
+    if (conn->removed)
     {
         return SW_CLOSE;
     }
-    if (conn->removed)
+
+    if (n < 0)
     {
-        return SW_OK;
+        return retval;
+    }
+    else if (n == 0)
+    {
+        return SW_CONTINUE;
+    }
+    else if (n < buffer->length)
+    {
+        off_t offset;
+        swString_pop_front(buffer, n);
+        offset = buffer->length - protocol->package_eof_len;
+        buffer->offset = offset > 0 ? offset : 0;
+    }
+    else
+    {
+        swString_clear(buffer);
     }
 
-    //there are remaining data
-    if (length < buffer->length)
-    {
-        swString_pop_front(buffer, length);
-        swTraceLog(SW_TRACE_EOF_PROTOCOL, "#[5] count=%d, remaining_length=%zu", count, buffer->length);
-        goto _find_eof;
-    }
-    swTraceLog(SW_TRACE_EOF_PROTOCOL, "#[3] length=%ld, size=%ld, offset=%ld", buffer->length, buffer->size, (long)buffer->offset);
-    swString_clear(buffer);
 #ifdef SW_USE_OPENSSL
     if (conn->ssl)
     {
         return SW_CONTINUE;
     }
 #endif
+
     return SW_OK;
 }
 
@@ -141,10 +139,10 @@ int swProtocol_recv_check_length(swProtocol *protocol, swSocket *conn, swString 
         recv_size = protocol->package_length_offset + package_length_size;
     }
 
-    recv_n = swConnection_recv(conn, buffer->str + buffer->length, recv_size, 0);
+    recv_n = swSocket_recv(conn, buffer->str + buffer->length, recv_size, 0);
     if (recv_n < 0)
     {
-        switch (swConnection_error(errno))
+        switch (swSocket_error(errno))
         {
         case SW_ERROR:
             swSysWarn("recv(%d, %d) failed", conn->fd, recv_size);
@@ -222,8 +220,8 @@ int swProtocol_recv_check_length(swProtocol *protocol, swSocket *conn, swString 
             {
                 swoole_error_log(SW_LOG_WARNING, SW_ERROR_PACKAGE_LENGTH_TOO_LARGE,
                         "package is too big, remote_addr=%s:%d, length=%zu",
-                        swConnection_get_ip(conn->socket_type, &conn->info),
-                        swConnection_get_port(conn->socket_type, &conn->info), package_length);
+                        swSocket_get_ip(conn->socket_type, &conn->info),
+                        swSocket_get_port(conn->socket_type, &conn->info), package_length);
                 return SW_ERR;
             }
             //get length success
@@ -271,10 +269,10 @@ int swProtocol_recv_check_eof(swProtocol *protocol, swSocket *conn, swString *bu
         buf_size = SW_BUFFER_SIZE_STD;
     }
 
-    int n = swConnection_recv(conn, buf_ptr, buf_size, 0);
+    int n = swSocket_recv(conn, buf_ptr, buf_size, 0);
     if (n < 0)
     {
-        switch (swConnection_error(errno))
+        switch (swSocket_error(errno))
         {
         case SW_ERROR:
             swSysWarn("recv from socket#%d failed", conn->fd);

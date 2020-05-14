@@ -1,19 +1,31 @@
 <?php
+/**
+ * This file is part of Swoole, for internal use only
+ *
+ * @link     https://www.swoole.com
+ * @contact  team@swoole.com
+ * @license  https://github.com/swoole/library/blob/master/LICENSE
+ */
+
 define('ROOT_DIR', dirname(__DIR__));
-define('LIBRARY_DIR', ROOT_DIR . '/library/src');
+define('LIBRARY_DIR', ROOT_DIR . '/library');
+define('LIBRARY_SRC_DIR', LIBRARY_DIR . '/src');
 
 define('EMOJI_OK', '✅');
 define('EMOJI_SUCCESS', '🚀');
 define('EMOJI_ERROR', '❌');
 define('EMOJI_WARN', '⚠️');
 define('SWOOLE_SOURCE_ROOT', dirname(__DIR__) . '/');
-define('SWOOLE_COLOR_RED', 1);
-define('SWOOLE_COLOR_GREEN', 2);
-define('SWOOLE_COLOR_YELLOW', 3);
-define('SWOOLE_COLOR_BLUE', 4);
-define('SWOOLE_COLOR_MAGENTA', 5);
-define('SWOOLE_COLOR_CYAN', 6);
-define('SWOOLE_COLOR_WHITE', 7);
+
+if (!defined('SWOOLE_COLOR_RED')) {
+    define('SWOOLE_COLOR_RED', 1);
+    define('SWOOLE_COLOR_GREEN', 2);
+    define('SWOOLE_COLOR_YELLOW', 3);
+    define('SWOOLE_COLOR_BLUE', 4);
+    define('SWOOLE_COLOR_MAGENTA', 5);
+    define('SWOOLE_COLOR_CYAN', 6);
+    define('SWOOLE_COLOR_WHITE', 7);
+}
 
 function space(int $length): string
 {
@@ -22,16 +34,19 @@ function space(int $length): string
 
 function camelize(string $uncamelized_words, string $separator = '_'): string
 {
-    $uncamelized_words = $separator . str_replace($separator, " ", strtolower($uncamelized_words));
-    return ltrim(str_replace(" ", "", ucwords($uncamelized_words)), $separator);
+    $uncamelized_words = $separator . str_replace($separator, ' ', strtolower($uncamelized_words));
+    return ltrim(str_replace(' ', '', ucwords($uncamelized_words)), $separator);
 }
 
 function unCamelize(string $camelCaps, string $separator = '_'): string
 {
-    return strtolower(preg_replace('/([a-z])([A-Z])/', "$1" . $separator . "$2", $camelCaps));
+    $camelCaps = preg_replace('/([a-z])([A-Z])/', "\${1}{$separator}\${2}", $camelCaps);
+    /* for special case like: PDOPool => pdo_pool */
+    $camelCaps = preg_replace('/([A-Z]+)([A-Z][a-z]+)/', "\${1}{$separator}\${2}\${3}", $camelCaps);
+    return strtolower($camelCaps);
 }
 
-function print_split_line(string $title = '', int $length = 32)
+function print_split_line(string $title = '', int $length = 32): void
 {
     if ($length % 2 !== 0) {
         $length += 1;
@@ -39,12 +54,12 @@ function print_split_line(string $title = '', int $length = 32)
     echo "< {$title} > " . str_repeat('=', $length) . PHP_EOL;
 }
 
-function swoole_log(string $content, int $color = 0)
+function swoole_log(string $content, int $color = 0): void
 {
     echo ($color ? "\033[3{$color}m{$content}\033[0m" : $content) . PHP_EOL;
 }
 
-function swoole_check(bool $is_ok, string $output)
+function swoole_check(bool $is_ok, string $output): void
 {
     if ($is_ok) {
         swoole_ok("{$output} OK!");
@@ -53,14 +68,14 @@ function swoole_check(bool $is_ok, string $output)
     }
 }
 
-function swoole_warn(string ...$args)
+function swoole_warn(string ...$args): void
 {
     foreach ($args as $arg) {
         swoole_log(EMOJI_WARN . " {$arg}", SWOOLE_COLOR_YELLOW);
     }
 }
 
-function swoole_error(string ...$args)
+function swoole_error(string ...$args): void
 {
     foreach ($args as $arg) {
         swoole_log(EMOJI_ERROR . " {$arg}", SWOOLE_COLOR_RED);
@@ -68,14 +83,14 @@ function swoole_error(string ...$args)
     exit(255);
 }
 
-function swoole_ok(string ...$args)
+function swoole_ok(string ...$args): void
 {
     foreach ($args as $arg) {
         swoole_log(EMOJI_OK . " {$arg}", SWOOLE_COLOR_GREEN);
     }
 }
 
-function swoole_success(string $content)
+function swoole_success(string $content): void
 {
     swoole_log(
         str_repeat(EMOJI_SUCCESS, 3) . $content . str_repeat(EMOJI_SUCCESS, 3),
@@ -84,11 +99,12 @@ function swoole_success(string $content)
     exit(0);
 }
 
-function swoole_execute_and_check(string $command)
+function swoole_execute_and_check(array $commands): void
 {
-    $basename = pathinfo(explode(' ', $command)[1], PATHINFO_FILENAME);
+    $basename = pathinfo($commands[1] ?? '', PATHINFO_FILENAME);
     echo "[{$basename}]" . PHP_EOL;
     echo "===========  Execute  ==============" . PHP_EOL;
+    $command = implode(' ', $commands);
     exec($command, $output, $return_var);
     if (substr($output[0] ?? '', 0, 2) === '#!') {
         array_shift($output);
@@ -107,7 +123,7 @@ function scan_dir(string $dir, callable $filter = null): array
     return array_values($filter ? array_filter($files, $filter) : $files);
 }
 
-function file_size(string $filename, int $decimals = 2)
+function file_size(string $filename, int $decimals = 2): string
 {
     $bytes = filesize($filename);
     $sz = 'BKMGTP';

@@ -45,7 +45,7 @@ enum sw_coro_hook_type
     SW_HOOK_CURL              = 1u << 28,
     SW_HOOK_BLOCKING_FUNCTION = 1u << 30,
 
-    SW_HOOK_ALL               = 0x7fffffff ^ SW_HOOK_CURL /* TODO: remove it */
+    SW_HOOK_ALL               = 0x7fffffff ^ SW_HOOK_CURL /* TODO: remove it [v4.6] */
 };
 
 struct php_coro_task
@@ -138,6 +138,11 @@ public:
         return sw_likely(task) ? task->pcid : 0;
     }
 
+    static inline long get_elapsed(long cid = 0)
+    {
+        return sw_likely(active) ? Coroutine::get_elapsed(cid) : -1;
+    }
+
     static inline php_coro_task* get_task()
     {
         php_coro_task *task = (php_coro_task *) Coroutine::get_current_task();
@@ -224,8 +229,6 @@ protected:
             task->last_msec = swTimer_get_absolute_msec();
         }
     }
-
-    static bool inject_function();
 };
 }
 

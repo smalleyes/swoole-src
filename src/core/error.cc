@@ -35,7 +35,7 @@ public:
 
 const char* swoole_strerror(int code)
 {
-    if (code < SW_ERROR_START)
+    if (code < SW_ERROR_BEGIN)
     {
         return strerror(code);
     }
@@ -88,6 +88,8 @@ const char* swoole_strerror(int code)
         return "Session invalid id";
     case SW_ERROR_SESSION_DISCARD_TIMEOUT_DATA:
         return "Session discard timeout data";
+    case SW_ERROR_SESSION_DISCARD_DATA:
+        return "Session discard data";
     case SW_ERROR_OUTPUT_BUFFER_OVERFLOW:
         return "Output buffer overflow";
     case SW_ERROR_OUTPUT_SEND_YIELD:
@@ -98,8 +100,8 @@ const char* swoole_strerror(int code)
         return "SSL cannot use senfile";
     case SW_ERROR_SSL_EMPTY_PEER_CERTIFICATE:
         return "SSL empty peer certificate";
-    case SW_ERROR_SSL_VEFIRY_FAILED:
-        return "SSL vefiry failed";
+    case SW_ERROR_SSL_VERIFY_FAILED:
+        return "SSL verify failed";
     case SW_ERROR_SSL_BAD_CLIENT:
         return "SSL bad client";
     case SW_ERROR_SSL_BAD_PROTOCOL:

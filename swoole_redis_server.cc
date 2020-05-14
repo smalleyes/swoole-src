@@ -14,7 +14,7 @@
   +----------------------------------------------------------------------+
 */
 
-#include "php_swoole_cxx.h"
+#include "swoole_server.h"
 #include "redis.h"
 
 #include <unordered_map>
@@ -107,7 +107,7 @@ static int redis_onReceive(swServer *serv, swEventData *req)
     }
 
     zval zdata;
-    php_swoole_get_recv_data(serv, &zdata, req, NULL, 0);
+    php_swoole_get_recv_data(serv, &zdata, req);
     char *p = Z_STRVAL(zdata);
     char *pe = p + Z_STRLEN(zdata);
     int ret;
@@ -217,8 +217,6 @@ static int redis_onReceive(swServer *serv, swEventData *req)
     return SW_OK;
 }
 
-extern swServer* php_swoole_server_get_and_check_server(zval *zobject);
-
 static PHP_METHOD(swoole_redis_server, start)
 {
     swServer *serv = php_swoole_server_get_and_check_server(ZEND_THIS);
@@ -249,11 +247,13 @@ static PHP_METHOD(swoole_redis_server, start)
     add_assoc_bool(zsetting, "open_length_check", 0);
     add_assoc_bool(zsetting, "open_redis_protocol", 0);
 
-    serv->listen_list->open_http_protocol = 0;
-    serv->listen_list->open_mqtt_protocol = 0;
-    serv->listen_list->open_eof_check = 0;
-    serv->listen_list->open_length_check = 0;
-    serv->listen_list->open_redis_protocol = 1;
+    auto primary_port = serv->listen_list->front();
+
+    primary_port->open_http_protocol = 0;
+    primary_port->open_mqtt_protocol = 0;
+    primary_port->open_eof_check = 0;
+    primary_port->open_length_check = 0;
+    primary_port->open_redis_protocol = 1;
 
     php_swoole_server_before_start(serv, zserv);
 

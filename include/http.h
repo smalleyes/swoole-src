@@ -92,22 +92,28 @@ enum swHttp_status_code
 typedef struct _swHttpRequest
 {
     uint8_t method;
-    uint8_t offset;
     uint8_t version;
-    uint8_t opcode;
-    uint8_t excepted;
-    uint8_t keep_alive;
+    uchar excepted :1;
+
+    uchar header_parsed :1;
+    uchar tried_to_dispatch :1;
+
+    uchar known_length :1;
+    uchar keep_alive :1;
+    uchar chunked :1;
+    uchar nobody_chunked :1;
 
     uint32_t url_offset;
     uint32_t url_length;
 
-    uint32_t header_length;
+    uint32_t request_line_length; /* without \r\n  */
+    uint32_t header_length; /* include request_line_length + \r\n */
     uint32_t content_length;
-    swString *buffer;
 
+    swString *buffer;
 } swHttpRequest;
 
-int swHttp_get_method(const char *method_str, int method_len);
+int swHttp_get_method(const char *method_str, size_t method_len);
 const char* swHttp_get_method_string(int method);
 const char *swHttp_get_status_message(int code);
 
@@ -115,17 +121,15 @@ size_t swHttp_url_decode(char *str, size_t len);
 char* swHttp_url_encode(char const *str, size_t len);
 
 int swHttpRequest_get_protocol(swHttpRequest *request);
-int swHttpRequest_get_header_info(swHttpRequest *request);
 int swHttpRequest_get_header_length(swHttpRequest *request);
+int swHttpRequest_get_chunked_body_length(swHttpRequest *request);
+void swHttpRequest_parse_header_info(swHttpRequest *request);
 void swHttpRequest_free(swConnection *conn);
 
 static inline void swHttpRequest_clean(swHttpRequest *request)
 {
     memset(request, 0, offsetof(swHttpRequest, buffer));
 }
-
-int swHttp_static_handler(swServer *serv, swHttpRequest *request, swConnection *conn);
-int swHttp_static_handler_add_location(swServer *serv, const char *location, size_t length);
 
 #ifdef SW_HTTP_100_CONTINUE
 int swHttpRequest_has_expect_header(swHttpRequest *request);

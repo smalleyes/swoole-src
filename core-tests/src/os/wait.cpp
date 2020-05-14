@@ -1,14 +1,12 @@
-#include "tests.h"
-#include "coroutine_c_api.h"
+#include "test_coroutine.h"
 
 using namespace swoole;
+using namespace swoole::test;
 
 TEST(os_wait, waitpid_before_child_exit)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
-        swoole_coroutine_signal_init();
-
         pid_t pid = fork();
         ASSERT_NE(pid, -1);
 
@@ -27,10 +25,8 @@ TEST(os_wait, waitpid_before_child_exit)
 
 TEST(os_wait, waitpid_after_child_exit)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
-        swoole_coroutine_signal_init();
-
         pid_t pid = fork();
         ASSERT_NE(pid, -1);
 
@@ -49,10 +45,8 @@ TEST(os_wait, waitpid_after_child_exit)
 
 TEST(os_wait, wait_before_child_exit)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
-        swoole_coroutine_signal_init();
-
         pid_t pid = fork();
         ASSERT_NE(pid, -1);
 
@@ -80,10 +74,8 @@ TEST(os_wait, wait_before_child_exit)
 
 TEST(os_wait, wait_after_child_exit)
 {
-    coro_test([](void *arg)
+    test::coroutine::test([](void *arg)
     {
-        swoole_coroutine_signal_init();
-
         pid_t pid = fork();
         ASSERT_NE(pid, -1);
 

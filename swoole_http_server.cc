@@ -14,8 +14,7 @@
   +----------------------------------------------------------------------+
 */
 
-#include "php_swoole_cxx.h"
-#include "swoole_http.h"
+#include "swoole_http_server.h"
 #include "websocket.h"
 
 #include "main/rfc1867.h"
@@ -38,13 +37,13 @@ zend_class_entry *swoole_http_server_ce;
 zend_object_handlers swoole_http_server_handlers;
 
 static bool http_context_send_data(http_context* ctx, const char *data, size_t length);
-static bool http_context_send_file(http_context* ctx, const char *file, uint32_t l_file, off_t offset, size_t length);
+static bool http_context_sendfile(http_context* ctx, const char *file, uint32_t l_file, off_t offset, size_t length);
 static bool http_context_disconnect(http_context* ctx);
 
 int php_swoole_http_onReceive(swServer *serv, swEventData *req)
 {
     int fd = req->info.fd;
-    int from_fd = req->info.server_fd;
+    int server_fd = req->info.server_fd;
 
     swConnection *conn = swServer_connection_verify_no_ssl(serv, fd);
     if (!conn)
@@ -53,7 +52,7 @@ int php_swoole_http_onReceive(swServer *serv, swEventData *req)
         return SW_ERR;
     }
 
-    swListenPort *port = (swListenPort *) serv->connection_list[from_fd].object;
+    swListenPort *port = (swListenPort *) serv->connection_list[server_fd].object;
     //other server port
     if (!port->open_http_protocol)
     {
@@ -75,7 +74,7 @@ int php_swoole_http_onReceive(swServer *serv, swEventData *req)
     swoole_http_server_init_context(serv, ctx);
 
     zval *zdata = &ctx->request.zdata;
-    php_swoole_get_recv_data(serv, zdata, req, NULL, 0);
+    php_swoole_get_recv_data(serv, zdata, req);
 
     swTraceLog(SW_TRACE_SERVER, "http request from %d with %d bytes: <<EOF\n%.*s\nEOF", fd, (int) Z_STRLEN_P(zdata), (int) Z_STRLEN_P(zdata), Z_STRVAL_P(zdata));
 
@@ -88,7 +87,7 @@ int php_swoole_http_onReceive(swServer *serv, swEventData *req)
     swoole_http_parser_init(parser, PHP_HTTP_REQUEST);
 
     size_t parsed_n = swoole_http_requset_parse(ctx, Z_STRVAL_P(zdata), Z_STRLEN_P(zdata));
-    if (parsed_n < Z_STRLEN_P(zdata))
+    if (ctx->parser.state == s_dead)
     {
 #ifdef SW_HTTP_BAD_REQUEST_PACKET
         ctx->send(ctx, SW_STRL(SW_HTTP_BAD_REQUEST_PACKET));
@@ -103,10 +102,10 @@ int php_swoole_http_onReceive(swServer *serv, swEventData *req)
         swConnection *serv_sock = swServer_connection_get(serv, conn->server_fd);
         if (serv_sock)
         {
-            add_assoc_long(zserver, "server_port", swConnection_get_port(serv_sock->socket_type, &serv_sock->info));
+            add_assoc_long(zserver, "server_port", swSocket_get_port(serv_sock->socket_type, &serv_sock->info));
         }
-        add_assoc_long(zserver, "remote_port", swConnection_get_port(conn->socket_type, &conn->info));
-        add_assoc_string(zserver, "remote_addr", (char *) swConnection_get_ip(conn->socket_type, &conn->info));
+        add_assoc_long(zserver, "remote_port", swSocket_get_port(conn->socket_type, &conn->info));
+        add_assoc_string(zserver, "remote_addr", (char *) swSocket_get_ip(conn->socket_type, &conn->info));
         add_assoc_long(zserver, "master_time", conn->last_time);
     } while (0);
 
@@ -116,7 +115,7 @@ int php_swoole_http_onReceive(swServer *serv, swEventData *req)
 
         if (conn->websocket_status == WEBSOCKET_STATUS_CONNECTION)
         {
-            fci_cache = php_swoole_server_get_fci_cache(serv, from_fd, SW_SERVER_CB_onHandShake);
+            fci_cache = php_swoole_server_get_fci_cache(serv, server_fd, SW_SERVER_CB_onHandShake);
             if (fci_cache == NULL)
             {
                 swoole_websocket_onHandshake(serv, port, ctx);
@@ -130,7 +129,7 @@ int php_swoole_http_onReceive(swServer *serv, swEventData *req)
         }
         else
         {
-            fci_cache = php_swoole_server_get_fci_cache(serv, from_fd, SW_SERVER_CB_onRequest);
+            fci_cache = php_swoole_server_get_fci_cache(serv, server_fd, SW_SERVER_CB_onRequest);
             if (fci_cache == NULL)
             {
                 swoole_websocket_onRequest(ctx);
@@ -157,19 +156,18 @@ int php_swoole_http_onReceive(swServer *serv, swEventData *req)
 
 void php_swoole_http_onClose(swServer *serv, swDataHead *ev)
 {
-    int fd = ev->fd;
-    swConnection *conn = swWorker_get_connection(serv, fd);
+    swConnection *conn = swWorker_get_connection(serv, ev->fd);
     if (!conn)
     {
         return;
     }
+    php_swoole_onClose(serv, ev);
 #ifdef SW_USE_HTTP2
     if (conn->http2_stream)
     {
         swoole_http2_server_session_free(conn);
     }
 #endif
-    php_swoole_onClose(serv, ev);
 }
 
 void php_swoole_http_server_minit(int module_number)
@@ -185,11 +183,6 @@ void php_swoole_http_server_minit(int module_number)
 http_context* swoole_http_context_new(int fd)
 {
     http_context *ctx = (http_context *) ecalloc(1, sizeof(http_context));
-    if (UNEXPECTED(!ctx))
-    {
-        swoole_error_log(SW_LOG_ERROR, SW_ERROR_MALLOC_FAIL, "ecalloc(%ld) failed", sizeof(http_context));
-        return NULL;
-    }
 
     zval *zrequest_object = &ctx->request._zobject;
     ctx->request.zobject = zrequest_object;
@@ -222,11 +215,12 @@ void swoole_http_server_init_context(swServer *serv, http_context *ctx)
     ctx->parse_files = serv->http_parse_files;
 #ifdef SW_HAVE_COMPRESSION
     ctx->enable_compression = serv->http_compression;
+    ctx->compression_level = serv->http_compression_level;
 #endif
     ctx->private_data = serv;
     ctx->upload_tmp_dir = serv->upload_tmp_dir;
     ctx->send = http_context_send_data;
-    ctx->sendfile = http_context_send_file;
+    ctx->sendfile = http_context_sendfile;
     ctx->close = http_context_disconnect;
 }
 
@@ -237,6 +231,7 @@ void swoole_http_context_copy(http_context *src, http_context *dst)
     dst->parse_files = src->parse_files;
 #ifdef SW_HAVE_COMPRESSION
     dst->enable_compression = src->enable_compression;
+    dst->compression_level = src->compression_level;
 #endif
     dst->private_data = src->private_data;
     dst->upload_tmp_dir = src->upload_tmp_dir;
@@ -255,7 +250,7 @@ void swoole_http_context_free(http_context *ctx)
 #ifdef SW_USE_HTTP2
     if (ctx->stream)
     {
-        ((http2_stream *) ctx->stream)->ctx = nullptr;
+        return;
     }
 #endif
 
@@ -268,6 +263,10 @@ void swoole_http_context_free(http_context *ctx)
     if (Z_TYPE(req->zdata) == IS_STRING)
     {
         zend_string_release(Z_STR(req->zdata));
+    }
+    if (req->chunked_body)
+    {
+        swString_free(req->chunked_body);
     }
 #ifdef SW_USE_HTTP2
     if (req->h2_data_buffer)
@@ -330,23 +329,18 @@ http_context* php_swoole_http_response_get_and_check_context(zval *zobject)
 bool http_context_send_data(http_context* ctx, const char *data, size_t length)
 {
     swServer *serv = (swServer *) ctx->private_data;
-    zval *return_value = (zval *) ctx->private_data_2;
     ssize_t ret = serv->send(serv, ctx->fd, (void*) data, length);
-    if (ret < 0 && SwooleG.error == SW_ERROR_OUTPUT_SEND_YIELD)
+    if (ret < 0 && swoole_get_last_error() == SW_ERROR_OUTPUT_SEND_YIELD)
     {
-        zval _yield_data;
-        ZVAL_STRINGL(&_yield_data, swoole_http_buffer->str, swoole_http_buffer->length);
-        php_swoole_server_send_yield(serv, ctx->fd, &_yield_data, return_value);
-        if (Z_TYPE_P(return_value) == IS_FALSE)
-        {
-            ctx->chunk = 0;
-            ctx->send_header = 0;
-        }
+        zval yield_data, return_value;
+        ZVAL_STRINGL(&yield_data, data, length);
+        php_swoole_server_send_yield(serv, ctx->fd, &yield_data, &return_value);
+        ret = Z_BVAL_P(&return_value) ? SW_OK : SW_ERR;
     }
     return ret == SW_OK;
 }
 
-static bool http_context_send_file(http_context* ctx, const char *file, uint32_t l_file, off_t offset, size_t length)
+static bool http_context_sendfile(http_context* ctx, const char *file, uint32_t l_file, off_t offset, size_t length)
 {
     swServer *serv = (swServer *) ctx->private_data;
     return serv->sendfile(serv, ctx->fd, file, l_file, offset, length) == SW_OK;

@@ -18,13 +18,15 @@
 #include "php_streams.h"
 #include "php_network.h"
 
+#include "server.h"
+
 using namespace swoole;
 
 zend_class_entry *swoole_process_ce;
 static zend_object_handlers swoole_process_handlers;
 
 static uint32_t php_swoole_worker_round_id = 0;
-static zend_fcall_info_cache *signal_fci_caches[SW_SIGNO_MAX] = {0};
+static zend_fcall_info_cache *signal_fci_caches[SW_SIGNO_MAX] = {};
 
 typedef struct
 {
@@ -89,7 +91,7 @@ static void php_swoole_process_free_object(zend_object *object)
 
 static zend_object *php_swoole_process_create_object(zend_class_entry *ce)
 {
-    process_t *process = (process_t *) ecalloc(1, sizeof(process_t) + zend_object_properties_size(ce));
+    process_t *process = (process_t *) zend_object_alloc(sizeof(process_t), ce);
     zend_object_std_init(&process->std, ce);
     object_properties_init(&process->std, ce);
     process->std.handlers = &swoole_process_handlers;
@@ -329,7 +331,7 @@ static PHP_METHOD(swoole_process, __construct)
         RETURN_FALSE;
     }
 
-    if (SwooleG.serv && SwooleG.serv->gs->start == 1 && swIsMaster())
+    if (sw_server() && sw_server()->gs->start == 1 && swIsMaster())
     {
         php_swoole_fatal_error(E_ERROR, "%s can't be used in master process", SW_Z_OBJCE_NAME_VAL_P(ZEND_THIS));
         RETURN_FALSE;
@@ -357,9 +359,9 @@ static PHP_METHOD(swoole_process, __construct)
     process = (swWorker *) ecalloc(1, sizeof(swWorker));
 
     uint32_t base = 1;
-    if (SwooleG.serv && SwooleG.serv->gs->start)
+    if (sw_server() && sw_server()->gs->start)
     {
-        base = SwooleG.serv->worker_num + SwooleG.serv->task_worker_num + SwooleG.serv->user_worker_num;
+        base = sw_server()->worker_num + sw_server()->task_worker_num + sw_server()->user_worker_num;
     }
     if (php_swoole_worker_round_id == 0)
     {
@@ -390,12 +392,13 @@ static PHP_METHOD(swoole_process, __construct)
             RETURN_FALSE;
         }
 
+        process->pipe_master = _pipe->getSocket(_pipe, SW_PIPE_MASTER);
+        process->pipe_worker = _pipe->getSocket(_pipe, SW_PIPE_WORKER);
+      
         process->pipe_object = _pipe;
-        process->pipe_master = _pipe->getFd(_pipe, SW_PIPE_MASTER);
-        process->pipe_worker = _pipe->getFd(_pipe, SW_PIPE_WORKER);
-        process->pipe = process->pipe_master;
+        process->pipe_current = process->pipe_master;
 
-        zend_update_property_long(swoole_process_ce, ZEND_THIS, ZEND_STRL("pipe"), process->pipe_master);
+        zend_update_property_long(swoole_process_ce, ZEND_THIS, ZEND_STRL("pipe"), process->pipe_master->fd);
     }
 
     zend::process *proc = new zend::process((enum zend::process_pipe_type) pipe_type, enable_coroutine);
@@ -651,7 +654,7 @@ static PHP_METHOD(swoole_process, alarm)
         RETURN_FALSE;
     }
 
-    struct itimerval timer_set = {{0}};
+    struct itimerval timer_set = {};
 
     if (usec > 0)
     {
@@ -742,12 +745,12 @@ int php_swoole_process_start(swWorker *process, zval *zobject)
 
     zend::process *proc = (zend::process *) process->ptr2;
 
-    process->pipe = process->pipe_worker;
+    process->pipe_current = process->pipe_worker;
     process->pid = getpid();
 
     if (process->redirect_stdin)
     {
-        if (dup2(process->pipe, STDIN_FILENO) < 0)
+        if (dup2(process->pipe_current->fd, STDIN_FILENO) < 0)
         {
             php_swoole_sys_error(E_WARNING, "dup2() failed");
         }
@@ -755,7 +758,7 @@ int php_swoole_process_start(swWorker *process, zval *zobject)
 
     if (process->redirect_stdout)
     {
-        if (dup2(process->pipe, STDOUT_FILENO) < 0)
+        if (dup2(process->pipe_current->fd, STDOUT_FILENO) < 0)
         {
             php_swoole_sys_error(E_WARNING, "dup2() failed");
         }
@@ -763,7 +766,7 @@ int php_swoole_process_start(swWorker *process, zval *zobject)
 
     if (process->redirect_stderr)
     {
-        if (dup2(process->pipe, STDERR_FILENO) < 0)
+        if (dup2(process->pipe_current->fd, STDERR_FILENO) < 0)
         {
             php_swoole_sys_error(E_WARNING, "dup2() failed");
         }
@@ -774,8 +777,10 @@ int php_swoole_process_start(swWorker *process, zval *zobject)
     SwooleWG.worker = process;
 
     zend_update_property_long(swoole_process_ce, zobject, ZEND_STRL("pid"), process->pid);
-    zend_update_property_long(swoole_process_ce, zobject, ZEND_STRL("pipe"), process->pipe_worker);
-
+    if (process->pipe_current)
+    {
+        zend_update_property_long(swoole_process_ce, zobject, ZEND_STRL("pipe"), process->pipe_current->fd);
+    }
     //eventloop create
     if (proc->enable_coroutine && php_swoole_reactor_init() < 0)
     {
@@ -844,14 +849,14 @@ static PHP_METHOD(swoole_process, read)
 
     swWorker *process = php_swoole_process_get_and_check_worker(ZEND_THIS);
 
-    if (process->pipe == 0)
+    if (process->pipe_current == nullptr)
     {
         php_swoole_fatal_error(E_WARNING, "no pipe, cannot read from pipe");
         RETURN_FALSE;
     }
 
     zend_string *buf = zend_string_alloc(buf_size, 0);
-    ssize_t ret = read(process->pipe, buf->val, buf_size);;
+    ssize_t ret = read(process->pipe_current->fd, buf->val, buf_size);;
     if (ret < 0)
     {
         efree(buf);
@@ -883,7 +888,7 @@ static PHP_METHOD(swoole_process, write)
     }
 
     swWorker *process = php_swoole_process_get_and_check_worker(ZEND_THIS);
-    if (process->pipe == 0)
+    if (process->pipe_current == nullptr)
     {
         php_swoole_fatal_error(E_WARNING, "no pipe, cannot write into pipe");
         RETURN_FALSE;
@@ -894,10 +899,9 @@ static PHP_METHOD(swoole_process, write)
     //async write
     if (SwooleTG.reactor)
     {
-        swSocket *_socket = swReactor_get(SwooleTG.reactor, process->pipe);
-        if (_socket && _socket->nonblock)
+        if (process->pipe_current->nonblock)
         {
-            ret = swoole_event_write(process->pipe, data, (size_t) data_len);
+            ret = swoole_event_write(process->pipe_current, data, (size_t) data_len);
         }
         else
         {
@@ -907,7 +911,7 @@ static PHP_METHOD(swoole_process, write)
     else
     {
         _blocking_read:
-        ret = swSocket_write_blocking(process->pipe, data, data_len);
+        ret = swSocket_write_blocking(process->pipe_current, data, data_len);
     }
 
     if (ret < 0)
@@ -924,7 +928,7 @@ static PHP_METHOD(swoole_process, write)
 static PHP_METHOD(swoole_process, exportSocket)
 {
     swWorker *process = php_swoole_process_get_and_check_worker(ZEND_THIS);
-    if (process->pipe == 0)
+    if (process->pipe_current == nullptr)
     {
         php_swoole_fatal_error(E_WARNING, "no pipe, cannot export stream");
         RETURN_FALSE;
@@ -932,7 +936,7 @@ static PHP_METHOD(swoole_process, exportSocket)
     zend::process *proc = (zend::process *) process->ptr2;
     if (!proc->zsocket)
     {
-        proc->zsocket = php_swoole_dup_socket(process->pipe, proc->pipe_type == zend::PIPE_TYPE_STREAM ? SW_SOCK_UNIX_STREAM : SW_SOCK_UNIX_DGRAM);
+        proc->zsocket = php_swoole_dup_socket(process->pipe_current->fd, proc->pipe_type == zend::PIPE_TYPE_STREAM ? SW_SOCK_UNIX_STREAM : SW_SOCK_UNIX_DGRAM);
         if (!proc->zsocket)
         {
             RETURN_FALSE;
@@ -1113,7 +1117,7 @@ static PHP_METHOD(swoole_process, daemon)
         ZEND_HASH_FOREACH_END();
     }
 
-    RETURN_BOOL(daemon(nochdir, noclose) == 0);
+    RETURN_BOOL(swoole_daemon(nochdir, noclose) == 0);
 }
 
 #ifdef HAVE_CPU_AFFINITY
@@ -1184,18 +1188,7 @@ static PHP_METHOD(swoole_process, exit)
         ret_code = 1;
     }
 
-    close(process->pipe);
-
-    SwooleG.running = 0;
-
-    if (ret_code == 0)
-    {
-        sw_zend_bailout();
-    }
-    else
-    {
-        exit(ret_code);
-    }
+    exit(ret_code);
 }
 
 static PHP_METHOD(swoole_process, close)
@@ -1207,7 +1200,7 @@ static PHP_METHOD(swoole_process, close)
     }
 
     swWorker *process = php_swoole_process_get_and_check_worker(ZEND_THIS);
-    if (process->pipe == 0)
+    if (process->pipe_current == nullptr)
     {
         php_swoole_fatal_error(E_WARNING, "no pipe, cannot close the pipe");
         RETURN_FALSE;
@@ -1222,11 +1215,11 @@ static PHP_METHOD(swoole_process, close)
     int ret;
     if (which == SW_PIPE_CLOSE_READ)
     {
-        ret = shutdown(process->pipe, SHUT_RD);
+        ret = shutdown(process->pipe_current->fd, SHUT_RD);
     }
     else if (which == SW_PIPE_CLOSE_WRITE)
     {
-        ret = shutdown(process->pipe, SHUT_WR);
+        ret = shutdown(process->pipe_current->fd, SHUT_WR);
     }
     else
     {
@@ -1239,9 +1232,9 @@ static PHP_METHOD(swoole_process, close)
     }
     if (which == 0)
     {
-        process->pipe = 0;
+        process->pipe_current = nullptr;
         efree(process->pipe_object);
-        process->pipe_object = NULL;
+        process->pipe_object = nullptr;
     }
     RETURN_TRUE;
 }
@@ -1276,12 +1269,12 @@ static PHP_METHOD(swoole_process, setTimeout)
     }
 
     swWorker *process = php_swoole_process_get_and_check_worker(ZEND_THIS);
-    if (process->pipe == 0)
+    if (process->pipe_current == nullptr)
     {
         php_swoole_fatal_error(E_WARNING, "no pipe, cannot setTimeout the pipe");
         RETURN_FALSE;
     }
-    SW_CHECK_RETURN(swSocket_set_timeout(process->pipe, seconds));
+    SW_CHECK_RETURN(swSocket_set_timeout(process->pipe_current, seconds));
 }
 
 static PHP_METHOD(swoole_process, setBlocking)
@@ -1293,25 +1286,17 @@ static PHP_METHOD(swoole_process, setBlocking)
     }
 
     swWorker *process = php_swoole_process_get_and_check_worker(ZEND_THIS);
-    if (process->pipe == 0)
+    if (process->pipe_current == nullptr)
     {
         php_swoole_fatal_error(E_WARNING, "no pipe, cannot setBlocking the pipe");
         RETURN_FALSE;
     }
     if (blocking)
     {
-        swSocket_set_blocking(process->pipe);
+        swSocket_set_block(process->pipe_current);
     }
     else
     {
-        swSocket_set_nonblock(process->pipe);
-    }
-    if (SwooleTG.reactor)
-    {
-        swSocket *_socket = swReactor_get(SwooleTG.reactor, process->pipe);
-        if (_socket)
-        {
-            _socket->nonblock = blocking ? 0 : 1;
-        }
+        swSocket_set_nonblock(process->pipe_current);
     }
 }

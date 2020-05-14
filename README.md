@@ -18,7 +18,7 @@ English | [中文](./README-CN.md)
 
 The network layer in Swoole is event-based and takes full advantage of the underlying epoll/kqueue implementation, making it really easy to serve millions of requests.
 
-Swoole 4.x use a brand new engine kernel and now it has a full-time developer team, so we are entering an unprecedented period in PHP history which offers a unique possibility for rapid evolution in performance.
+Swoole 4.x uses a brand new engine kernel and now it has a full-time developer team, so we are entering an unprecedented period in PHP history which offers a unique possibility for rapid evolution in performance.
 
 ## ⚡️Coroutine
 
@@ -436,23 +436,19 @@ echo 'use ' . (microtime(true) - $s) . ' s';
 
 > As with any open source project, Swoole always provides the most reliable stability and the most powerful features in **the latest released version**. Please ensure as much as possible that you are using the latest version.
 
-### 1. From binary package (beginners + dev-env)
-
-See our [download page](https://www.swoole.com/page/download)
-
 ### Compiling requirements
 
-- Linux, OS X or Cygwin, WSL
-- PHP 7.0.0 or later (The higher the version, the better the performance.)
-- GCC 4.8 or later
++ Linux, OS X or Cygwin, WSL
++ PHP 7.0.0 or later (The higher the version, the better the performance.)
++ GCC 4.8 or later
 
-### 2. Install via PECL (beginners)
+### 1. Install via PECL (beginners)
 
 ```shell
 pecl install swoole
 ```
 
-### 3. Install from source (recommended)
+### 2. Install from source (recommended)
 
 Please download the source packages from [Releases](https://github.com/swoole/swoole-src/releases) or:
 
@@ -478,10 +474,10 @@ After compiling and installing to the system successfully, you have to add a new
 
 > for example: `./configure --enable-openssl --enable-sockets`
 
-- `--enable-openssl` or `--with-openssl-dir=DIR`
-- `--enable-sockets`
-- `--enable-http2`
-- `--enable-mysqlnd` (need mysqlnd, it just for supporting `$mysql->escape` method)
++ `--enable-openssl` or `--with-openssl-dir=DIR`
++ `--enable-sockets`
++ `--enable-http2`
++ `--enable-mysqlnd` (need mysqlnd, it just for supporting `$mysql->escape` method)
 
 ### Upgrade
 
@@ -508,28 +504,31 @@ sudo make install
 Enable it by adding a new line `extension=swoole_async.so` to `php.ini`.
 
 ## 💎 Frameworks & Components
-- [**Hyperf**](https://github.com/hyperf/hyperf) is a coroutine framework that focuses on hyperspeed and flexibility, specifically used for build microservices or middlewares.
-- [**Swoft**](https://github.com/swoft-cloud/swoft) is a modern, high-performance AOP and coroutine PHP framework.
-- [**Easyswoole**](https://www.easyswoole.com) is a simple, high-performance PHP framework, based on Swoole, which makes using Swoole as easy as `echo "hello world"`.
-- [**Saber**](https://github.com/swlib/saber) is a human-friendly, high-performance HTTP client component that has almost everything you can imagine.
++ [**Hyperf**](https://github.com/hyperf/hyperf) is a coroutine framework that focuses on hyperspeed and flexibility, specifically used for build microservices or middlewares.
++ [**Swoft**](https://github.com/swoft-cloud/swoft) is a modern, high-performance AOP and coroutine PHP framework.
++ [**Easyswoole**](https://www.easyswoole.com) is a simple, high-performance PHP framework, based on Swoole, which makes using Swoole as easy as `echo "hello world"`.
++ [**MixPHP**](https://github.com/mix-php/mix) is a powerful single-threaded coroutine framework with a very small footprint, simple and elegant.
++ [**imi**](https://github.com/Yurunsoft/imi) is a high-performance coroutine application development framework based on PHP Swoole, which supports the development of HttpApi, WebSocket, TCP, UDP services.
++ [**Saber**](https://github.com/swlib/saber) is a human-friendly, high-performance HTTP client component that has almost everything you can imagine.
++ [**One**](https://github.com/lizhichao/one) is a minimalist, high-performance PHP framework that supports the [swoole | php-fpm] environment
 
 ## 🛠 Develop & Discussion
 
-* __中文文档__: <http://wiki.swoole.com>
-* __Documentation__: <https://www.swoole.co.uk/docs>
-* __IDE Helper & API__: <https://github.com/swoole/ide-helper>
-* __中文社区__: <https://wiki.swoole.com/wiki/page/p-discussion.html>
-* __Twitter__: <https://twitter.com/php_swoole>
-* __Slack Group__: <https://swoole.slack.com>
++ __中文文档__: <https://wiki.swoole.com>
++ __Documentation__: <https://www.swoole.co.uk/docs>
++ __IDE Helper & API__: <https://github.com/swoole/ide-helper>
++ __中文社区__: <https://wiki.swoole.com/#/other/discussion>
++ __Twitter__: <https://twitter.com/php_swoole>
++ __Slack Group__: <https://swoole.slack.com>
 
 ## 🍭 Benchmark
 
 + On the open source [Techempower Web Framework benchmarks](https://www.techempower.com/benchmarks/#section=data-r17) Swoole used MySQL database benchmark to rank first, and all performance tests ranked in the first echelon.
 + You can just run [Benchmark Script](./benchmark/benchmark.php) to quickly test the maximum QPS of Swoole-HTTP-Server on your machine.
 
-## 🖊️ Security issues
+## 🔰️ Security issues
 
-Security issues should be reported privately, via email, to the Swoole develop team team@swoole.com. You should receive a response within 24 hours. If for some reason you do not, please follow up via email to ensure we received your original message.
+Security issues should be reported privately, via email, to the Swoole develop team [team@swoole.com](mailto:team@swoole.com). You should receive a response within 24 hours. If for some reason you do not, please follow up via email to ensure we received your original message.
 
 ## 🖊️ Contribution
 

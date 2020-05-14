@@ -104,7 +104,7 @@ function skip_if_file_not_exist(string $filename)
 
 function skip_if_command_not_found(string $command)
 {
-    skip("command {$command} not found", empty(`{$command} --help | grep -i usage`));
+    skip("command {$command} not found", empty(`{$command} --help 2>&1 | grep -i usage`));
 }
 
 function skip_if_no_ssl()
@@ -132,8 +132,7 @@ function skip_if_no_http2()
 
 function skip_if_no_ipv6()
 {
-    $socket = socket_create(AF_INET6, SOCK_STREAM, SOL_TCP);
-    skip('no ipv6 address', !socket_bind($socket, "::1", 0));
+    skip('no ipv6 address', !@stream_socket_server('tcp://[::1]:0'));
 }
 
 function skip_if_no_top()
@@ -215,16 +214,19 @@ function skip_if_pdo_not_support_mysql8()
 function skip_if_not_mysql8()
 {
     require_once __DIR__ . '/config.php';
-    $skip = false;
-    go(function () use (&$skip) {
-        if (!preg_match(
-            '/caching_sha2_password/',
-            httpGetBody('http://' . MYSQL_SERVER_HOST . ':' . MYSQL_SERVER_PORT))
-        ) {
-            $skip = true;
+    $skip = true;
+    Swoole\Coroutine\run(function () use (&$skip) {
+        try {
+            if (preg_match(
+                '/caching_sha2_password/',
+                httpGetBody('http://' . MYSQL_SERVER_HOST . ':' . MYSQL_SERVER_PORT))
+            ) {
+                $skip = false;
+            }
+        } catch (Throwable $throwable) {
+            // ignored
         }
     });
-    Swoole\Event::wait();
     if ($skip) {
         skip('require mysql8');
     }

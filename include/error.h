@@ -22,7 +22,7 @@ enum swErrorCode
     /**
      * Prevent repetition with errno [syscall error]
      */
-    SW_ERROR_START = 500,
+    SW_ERROR_BEGIN = 500,
 
     /**
      * common error
@@ -55,12 +55,13 @@ enum swErrorCode
     SW_ERROR_SESSION_NOT_EXIST,
     SW_ERROR_SESSION_INVALID_ID,
     SW_ERROR_SESSION_DISCARD_TIMEOUT_DATA,
+    SW_ERROR_SESSION_DISCARD_DATA,
     SW_ERROR_OUTPUT_BUFFER_OVERFLOW,
     SW_ERROR_OUTPUT_SEND_YIELD,
     SW_ERROR_SSL_NOT_READY,
     SW_ERROR_SSL_CANNOT_USE_SENFILE,
     SW_ERROR_SSL_EMPTY_PEER_CERTIFICATE,
-    SW_ERROR_SSL_VEFIRY_FAILED,
+    SW_ERROR_SSL_VERIFY_FAILED,
     SW_ERROR_SSL_BAD_CLIENT,
     SW_ERROR_SSL_BAD_PROTOCOL,
     SW_ERROR_SSL_RESET,
@@ -151,8 +152,5 @@ enum swErrorCode
 
     SW_ERROR_END
 };
-
-const char* swoole_strerror(int code);
-void swoole_throw_error(int code);
 
 #endif /* SW_ERRNO_H_ */

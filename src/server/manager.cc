@@ -43,7 +43,6 @@ typedef std::unordered_map<uint32_t, pid_t> reload_list_t;
 
 static int swManager_loop(swServer *serv);
 static void swManager_signal_handler(int sig);
-static pid_t swManager_spawn_worker(swServer *serv, int worker_id);
 static void swManager_check_exit_status(swServer *serv, int worker_id, pid_t pid, int status);
 
 static swManagerProcess ManagerProcess;
@@ -106,6 +105,69 @@ static void swManager_add_timeout_killer(swServer *serv, swWorker *workers, int 
     swoole_timer_after((long) (serv->max_wait_time * 2 * 1000), swManager_kill_timeout_process, _list);
 }
 
+/**
+ * fork task worker processes
+ */
+static sw_inline int swManager_spawn_task_workers(swServer *serv)
+{
+    if (serv->task_worker_num > 0)
+    {
+        return swProcessPool_start(&serv->gs->task_workers);
+    }
+
+    return SW_OK;
+}
+
+/**
+ * fork worker processes
+ */
+static sw_inline int swManager_spawn_workers(swServer *serv)
+{
+    pid_t pid;
+        
+    for (uint32_t i = 0; i < serv->worker_num; i++)
+    {
+        pid = swManager_spawn_worker(serv, &serv->workers[i]);
+        if (pid < 0)
+        {
+            swError("fork() failed");
+            return SW_ERR;
+        }
+        else
+        {
+            serv->workers[i].pid = pid;
+        }
+    }
+
+    return SW_OK;
+}
+
+/**
+ * fork user worker processes
+ */
+static sw_inline int swManager_spawn_user_workers(swServer *serv)
+{
+    pid_t pid;
+
+    if (serv->user_worker_list)
+    {
+        for (auto worker : *serv->user_worker_list)
+        {
+            if (worker->pipe_object)
+            {
+                swServer_store_pipe_fd(serv, worker->pipe_object);
+            }
+            pid = swManager_spawn_user_worker(serv, worker);
+            if (pid < 0)
+            {
+                return SW_ERR;
+            }
+        }
+    }
+
+    return SW_OK;
+}
+
 //create worker child proccess
 int swManager_start(swServer *serv)
 {
@@ -114,7 +176,7 @@ int swManager_start(swServer *serv)
 
     if (serv->task_worker_num > 0)
     {
-        if (swServer_create_task_worker(serv) < 0)
+        if (swServer_create_task_workers(serv) < 0)
         {
             return SW_ERR;
         }
@@ -138,17 +200,15 @@ int swManager_start(swServer *serv)
     //User Worker Process
     if (serv->user_worker_num > 0)
     {
-        serv->user_workers = (swWorker *) SwooleG.memory_pool->alloc(SwooleG.memory_pool, serv->user_worker_num * sizeof(swWorker));
-        if (serv->user_workers == NULL)
+        if (swServer_create_user_workers(serv) < 0)
         {
-            swSysWarn("gmalloc[server->user_workers] failed");
             return SW_ERR;
         }
-        swUserWorker_node *user_worker;
+
         i = 0;
-        LL_FOREACH(serv->user_worker_list, user_worker)
+        for (auto worker : *serv->user_worker_list)
         {
-            memcpy(&serv->user_workers[i], user_worker->worker, sizeof(swWorker));
+            memcpy(&serv->user_workers[i], worker, sizeof(swWorker));
             if (swServer_worker_create(serv, &serv->user_workers[i]) < 0)
             {
                 return SW_ERR;
@@ -175,46 +235,18 @@ int swManager_start(swServer *serv)
             return SW_OK;
         }
         swServer_close_port(serv, SW_TRUE);
-        /**
-         * create task worker process
-         */
-        if (serv->task_worker_num > 0)
+        
+        if (swManager_spawn_task_workers(serv) < 0)
         {
-            swProcessPool_start(&serv->gs->task_workers);
+            return SW_ERR;
         }
-        /**
-         * create worker process
-         */
-        for (i = 0; i < serv->worker_num; i++)
+        if (swManager_spawn_workers(serv) < 0)
         {
-            pid = swManager_spawn_worker(serv, i);
-            if (pid < 0)
-            {
-                swError("fork() failed");
-                return SW_ERR;
-            }
-            else
-            {
-                serv->workers[i].pid = pid;
-            }
+            return SW_ERR;
         }
-        /**
-         * create user worker process
-         */
-        if (serv->user_worker_list)
+        if (swManager_spawn_user_workers(serv) < 0)
         {
-            swUserWorker_node *user_worker;
-            LL_FOREACH(serv->user_worker_list, user_worker)
-            {
-                /**
-                 * store the pipe object
-                 */
-                if (user_worker->worker->pipe_object)
-                {
-                    swServer_store_pipe_fd(serv, user_worker->worker->pipe_object);
-                }
-                swManager_spawn_user_worker(serv, user_worker->worker);
-            }
+            return SW_ERR;
         }
 
         SwooleG.process_type = SW_PROCESS_MANAGER;
@@ -270,6 +302,7 @@ static int swManager_loop(swServer *serv)
 
     //for reload
     swSignal_add(SIGHUP, NULL);
+    swSignal_add(SIGCHLD, swManager_signal_handler);
     swSignal_add(SIGTERM, swManager_signal_handler);
     swSignal_add(SIGUSR1, swManager_signal_handler);
     swSignal_add(SIGUSR2, swManager_signal_handler);
@@ -317,7 +350,7 @@ static int swManager_loop(swServer *serv)
                 }
                 else
                 {
-                    pid_t new_pid = swManager_spawn_worker(serv, msg.worker_id);
+                    pid_t new_pid = swManager_spawn_worker(serv, &serv->workers[msg.worker_id]);
                     if (new_pid > 0)
                     {
                         serv->workers[msg.worker_id].pid = new_pid;
@@ -348,6 +381,10 @@ static int swManager_loop(swServer *serv)
             else if (ManagerProcess.reload_all_worker)
             {
                 swInfo("Server is reloading all workers now");
+                if (serv->onBeforeReload != NULL)
+                {
+                    serv->onBeforeReload(serv);
+                }
                 if (!ManagerProcess.reload_init)
                 {
                     ManagerProcess.reload_init = true;
@@ -390,9 +427,14 @@ static int swManager_loop(swServer *serv)
                 if (serv->task_worker_num == 0)
                 {
                     swWarn("cannot reload task workers, task workers is not started");
+                    ManagerProcess.reloading = false;
                     continue;
                 }
                 swInfo("Server is reloading task workers now");
+                if (serv->onBeforeReload != NULL)
+                {
+                    serv->onBeforeReload(serv);
+                }
                 if (!ManagerProcess.reload_init)
                 {
                     memcpy(ManagerProcess.reload_workers, serv->gs->task_workers.workers, sizeof(swWorker) * serv->task_worker_num);
@@ -425,7 +467,7 @@ static int swManager_loop(swServer *serv)
 
                 while (1)
                 {
-                    new_pid = swManager_spawn_worker(serv, i);
+                    new_pid = swManager_spawn_worker(serv, &serv->workers[i]);
                     if (new_pid < 0)
                     {
                         SW_START_SLEEP;
@@ -469,6 +511,10 @@ static int swManager_loop(swServer *serv)
             {
                 reload_worker_pid = ManagerProcess.reload_worker_i = 0;
                 ManagerProcess.reload_init = ManagerProcess.reloading = false;
+                if (serv->onAfterReload != NULL)
+                {
+                    serv->onAfterReload(serv);
+                }
                 continue;
             }
             reload_worker_pid = ManagerProcess.reload_workers[ManagerProcess.reload_worker_i].pid;
@@ -511,8 +557,8 @@ static int swManager_loop(swServer *serv)
             uint64_t key;
             while (1)
             {
-                swWorker* user_worker = (swWorker *) swHashMap_each_int(serv->user_worker_map, &key);
-                //hashmap empty
+                swWorker *user_worker = (swWorker *) swHashMap_each_int(serv->user_worker_map, &key);
+                // no other user_worker
                 if (user_worker == NULL)
                 {
                     break;
@@ -525,29 +571,9 @@ static int swManager_loop(swServer *serv)
          */
         alarm(serv->max_wait_time * 2);
     }
-    //kill all child process
-    for (i = 0; i < serv->worker_num; i++)
-    {
-        swTrace("[Manager]kill worker processor");
-        swoole_kill(serv->workers[i].pid, SIGTERM);
-    }
-    for (i = 0; i < serv->worker_num; i++)
-    {
-        if (swoole_waitpid(serv->workers[i].pid, &status, 0) < 0)
-        {
-            swSysWarn("waitpid(%d) failed", serv->workers[i].pid);
-        }
-    }
-    //kill and wait task process
-    if (serv->task_worker_num > 0)
-    {
-        swProcessPool_shutdown(&serv->gs->task_workers);
-    }
-    //kill all user process
-    if (serv->user_worker_map)
-    {
-        swManager_kill_user_worker(serv);
-    }
+    swManager_kill_workers(serv);
+    swManager_kill_task_workers(serv);
+    swManager_kill_user_workers(serv);
     //force kill
     if (serv->max_wait_time)
     {
@@ -559,32 +585,6 @@ static int swManager_loop(swServer *serv)
     }
 
     return SW_OK;
-}
-
-static pid_t swManager_spawn_worker(swServer *serv, int worker_id)
-{
-    pid_t pid;
-    int ret;
-
-    pid = swoole_fork(0);
-
-    //fork() failed
-    if (pid < 0)
-    {
-        swSysWarn("Fork Worker failed");
-        return SW_ERR;
-    }
-    //worker child processor
-    else if (pid == 0)
-    {
-        ret = swWorker_loop(serv, worker_id);
-        exit(ret);
-    }
-    //parent,add to writer
-    else
-    {
-        return pid;
-    }
 }
 
 static void swManager_signal_handler(int sig)
@@ -632,48 +632,58 @@ static void swManager_signal_handler(int sig)
 #ifdef SIGRTMIN
         if (sig == SIGRTMIN)
         {
-            swLog_reopen(SwooleG.serv->daemonize ? SW_TRUE : SW_FALSE);
+            swLog_reopen(sw_server()->daemonize ? SW_TRUE : SW_FALSE);
         }
 #endif
         break;
     }
 }
 
+/**
+ * @return: success returns pid, failure returns SW_ERR.
+ */
 int swManager_wait_other_worker(swProcessPool *pool, pid_t pid, int status)
 {
     swServer *serv = (swServer *) pool->ptr;
-    swWorker *exit_worker;
+    swWorker *exit_worker = nullptr;
+    int worker_type;
 
-    if (serv->gs->task_workers.map)
-    {
-        exit_worker = (swWorker *) swHashMap_find_int(serv->gs->task_workers.map, pid);
-        if (exit_worker)
+    do {
+        if (serv->gs->task_workers.map)
         {
-            swManager_check_exit_status(serv, exit_worker->id, pid, status);
-            return swManager_spawn_task_worker(serv, exit_worker);
+            exit_worker = (swWorker *) swHashMap_find_int(serv->gs->task_workers.map, pid);
+            if (exit_worker != nullptr)
+            {
+                worker_type = SW_PROCESS_TASKWORKER;
+                break;
+            }
         }
-    }
-
-    if (serv->user_worker_map)
-    {
-        exit_worker = (swWorker *) swHashMap_find_int(serv->user_worker_map, pid);
-        if (exit_worker != NULL)
+        if (serv->user_worker_map)
         {
-            swManager_check_exit_status(serv, exit_worker->id, pid, status);
-            return swManager_spawn_user_worker(serv, exit_worker);
+            exit_worker = (swWorker *) swHashMap_find_int(serv->user_worker_map, pid);
+            if (exit_worker != nullptr)
+            {
+                worker_type = SW_PROCESS_USERWORKER;
+                break;
+            }
         }
-    }
+        return SW_ERR;
+    } while (0);
 
-    return SW_ERR;
+    swManager_check_exit_status(serv, exit_worker->id, pid, status);
+    return swManager_spawn_worker_by_type(serv, exit_worker, worker_type);
 }
 
-void swManager_kill_user_worker(swServer *serv)
+/**
+ * kill and wait all user process
+ */
+void swManager_kill_user_workers(swServer *serv)
 {
     if (!serv->user_worker_map)
     {
         return;
     }
-    swWorker* user_worker;
+    swWorker *user_worker;
     uint64_t key;
     int __stat_loc;
 
@@ -707,9 +717,67 @@ void swManager_kill_user_worker(swServer *serv)
     }
 }
 
-pid_t swManager_spawn_task_worker(swServer *serv, swWorker* worker)
+/**
+ * kill and wait all child process
+ */
+void swManager_kill_workers(swServer *serv)
 {
-    return swProcessPool_spawn(&serv->gs->task_workers, worker);
+    int status;
+
+    if (serv->worker_num == 0)
+    {
+        return;
+    }
+
+    for (uint32_t i = 0; i < serv->worker_num; i++)
+    {
+        swTrace("[Manager]kill worker processor");
+        swoole_kill(serv->workers[i].pid, SIGTERM);
+    }
+    for (uint32_t i = 0; i < serv->worker_num; i++)
+    {
+        if (swoole_waitpid(serv->workers[i].pid, &status, 0) < 0)
+        {
+            swSysWarn("waitpid(%d) failed", serv->workers[i].pid);
+        }
+    }
+}
+
+/**
+ * kill and wait task process
+ */
+void swManager_kill_task_workers(swServer *serv)
+{
+    if (serv->task_worker_num == 0)
+    {
+        return;
+    }
+    swProcessPool_shutdown(&serv->gs->task_workers);
+}
+
+pid_t swManager_spawn_worker(swServer *serv, swWorker *worker)
+{
+    pid_t pid;
+
+    pid = swoole_fork(0);
+
+    //fork() failed
+    if (pid < 0)
+    {
+        swSysWarn("Fork Worker failed");
+        return SW_ERR;
+    }
+    //worker child processor
+    else if (pid == 0)
+    {
+        
+        exit(swWorker_loop(serv, worker));
+    }
+    //parent,add to writer
+    else
+    {
+        return pid;
+    }
 }
 
 pid_t swManager_spawn_user_worker(swServer *serv, swWorker* worker)
@@ -751,4 +819,32 @@ pid_t swManager_spawn_user_worker(swServer *serv, swWorker* worker)
         swHashMap_add_int(serv->user_worker_map, pid, worker);
         return pid;
     }
+}
+
+pid_t swManager_spawn_task_worker(swServer *serv, swWorker* worker)
+{
+    return swProcessPool_spawn(&serv->gs->task_workers, worker);
+}
+
+pid_t swManager_spawn_worker_by_type(swServer *serv, swWorker *worker, int worker_type)
+{
+    pid_t pid = -1;
+
+    switch (worker_type)
+    {
+    case SW_PROCESS_WORKER:
+        pid = swManager_spawn_worker(serv, worker);
+        break;
+    case SW_PROCESS_TASKWORKER:
+        pid = swManager_spawn_task_worker(serv, worker);
+        break;
+    case SW_PROCESS_USERWORKER:
+        pid = swManager_spawn_user_worker(serv, worker);
+        break;
+    default:
+        /* never here */
+        abort();
+    }
+
+    return pid;
 }

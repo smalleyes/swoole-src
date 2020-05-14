@@ -52,9 +52,9 @@ using swoole::coroutine::Socket;
 
 extern "C"
 {
-static PHP_METHOD(swoole_runtime, enableStrictMode);
 static PHP_METHOD(swoole_runtime, enableCoroutine);
 static PHP_METHOD(swoole_runtime, getHookFlags);
+static PHP_METHOD(swoole_runtime, setHookFlags);
 static PHP_FUNCTION(swoole_sleep);
 static PHP_FUNCTION(swoole_usleep);
 static PHP_FUNCTION(swoole_time_nanosleep);
@@ -82,6 +82,10 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_swoole_runtime_enableCoroutine, 0, 0, 0)
     ZEND_ARG_INFO(0, enable)
+    ZEND_ARG_INFO(0, flags)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_swoole_runtime_setHookFlags, 0, 0, 1)
     ZEND_ARG_INFO(0, flags)
 ZEND_END_ARG_INFO()
 
@@ -148,9 +152,9 @@ extern "C"
 
 static const zend_function_entry swoole_runtime_methods[] =
 {
-    PHP_ME(swoole_runtime, enableStrictMode, arginfo_swoole_void, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     PHP_ME(swoole_runtime, enableCoroutine, arginfo_swoole_runtime_enableCoroutine, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     PHP_ME(swoole_runtime, getHookFlags, arginfo_swoole_void, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+    PHP_ME(swoole_runtime, setHookFlags, arginfo_swoole_runtime_setHookFlags, ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     PHP_FE_END
 };
 
@@ -177,26 +181,6 @@ void php_swoole_runtime_minit(int module_number)
     swoole_proc_open_init(module_number);
 }
 
-static auto block_io_functions = {
-    "sleep",
-    "usleep",
-    "time_nanosleep",
-    "time_sleep_until",
-    "file_get_contents",
-    "curl_init",
-    "stream_select",
-    "pcntl_fork",
-    "popen",
-    "socket_select",
-    "gethostbyname",
-};
-
-static auto block_io_classes = {
-    "redis", "pdo", "mysqli",
-};
-
-static bool enable_strict_mode = false;
-
 struct real_func
 {
     zend_function *function;
@@ -207,10 +191,12 @@ struct real_func
 
 void php_swoole_runtime_rshutdown()
 {
-    if (!function_table)
+    if (!hook_init)
     {
         return;
     }
+
+    hook_init = false;
 
     void *ptr;
     ZEND_HASH_FOREACH_PTR(function_table, ptr)
@@ -231,20 +217,6 @@ void php_swoole_runtime_rshutdown()
     zend_hash_destroy(function_table);
     efree(function_table);
     function_table = nullptr;
-}
-
-static PHP_METHOD(swoole_runtime, enableStrictMode)
-{
-    php_swoole_fatal_error(E_DEPRECATED, "Swoole\\Runtime::enableStrictMode is deprecated, it will be removed in v4.5.0");
-    for (auto f : block_io_functions)
-    {
-        zend_disable_function((char *) f, strlen((char *) f));
-    }
-    for (auto c : block_io_classes)
-    {
-        zend_disable_class((char *) c, strlen((char *) c));
-    }
-    enable_strict_mode = true;
 }
 
 static inline char *parse_ip_address_ex(const char *str, size_t str_len, int *portno, int get_err, zend_string **err)
@@ -346,7 +318,7 @@ static ssize_t socket_read(php_stream *stream, char *buf, size_t count)
     /**
      * sock->errCode != ETIMEDOUT : Compatible with sync blocking IO
      */
-    stream->eof = (nr_bytes == 0 || (nr_bytes == -1 && sock->errCode != ETIMEDOUT && swConnection_error(sock->errCode) == SW_CLOSE));
+    stream->eof = (nr_bytes == 0 || (nr_bytes == -1 && sock->errCode != ETIMEDOUT && swSocket_error(sock->errCode) == SW_CLOSE));
     if (nr_bytes > 0)
     {
         php_stream_notify_progress_increment(PHP_STREAM_CONTEXT(stream), nr_bytes, 0);
@@ -465,9 +437,10 @@ static int socket_stat(php_stream *stream, php_stream_statbuf *ssb)
 
 static inline int socket_connect(php_stream *stream, Socket *sock, php_stream_xport_param *xparam)
 {
-    char *host = NULL;
-    int portno = 0;
+    char *host = NULL, *bindto = NULL;
+    int portno = 0, bindport = 0;
     int ret = 0;
+    zval *tmpzval = NULL;
     char *ip_address = NULL;
 
     if (UNEXPECTED(sock->get_fd() < 0))
@@ -494,6 +467,31 @@ static inline int socket_connect(php_stream *stream, Socket *sock, php_stream_xp
     {
         return FAILURE;
     }
+    if (PHP_STREAM_CONTEXT(stream) && (tmpzval = php_stream_context_get_option(PHP_STREAM_CONTEXT(stream), "socket", "bindto")) != NULL)
+    {
+        if (Z_TYPE_P(tmpzval) != IS_STRING)
+        {
+            if (xparam->want_errortext)
+            {
+                xparam->outputs.error_text = strpprintf(0, "local_addr context option is not a string.");
+            }
+            efree(ip_address);
+            return FAILURE;
+        }
+        bindto = parse_ip_address_ex(Z_STRVAL_P(tmpzval), Z_STRLEN_P(tmpzval), &bindport, xparam->want_errortext, &xparam->outputs.error_text);
+        if (bindto == NULL)
+        {
+            efree(ip_address);
+            return FAILURE;
+        }
+        if (!sock->bind(bindto, bindport))
+        {
+            efree(ip_address);
+            efree(bindto);
+            return FAILURE;
+        }
+    }
+    
     if (xparam->inputs.timeout)
     {
         sock->set_timeout(xparam->inputs.timeout, SW_TIMEOUT_CONNECT);
@@ -510,6 +508,10 @@ static inline int socket_connect(php_stream *stream, Socket *sock, php_stream_xp
     if (ip_address)
     {
         efree(ip_address);
+    }
+    if (bindto)
+    {
+        efree(bindto);
     }
     return ret;
 }
@@ -569,6 +571,18 @@ static inline int socket_accept(php_stream *stream, Socket *sock, php_stream_xpo
     }
 
     Socket *clisock = sock->accept();
+
+#ifdef SW_USE_OPENSSL
+    if (clisock != nullptr && clisock->open_ssl)
+    {
+        if (!clisock->ssl_handshake())
+        {
+            sock->errCode = clisock->errCode;
+            delete clisock;
+            clisock = nullptr;
+        }
+    }
+#endif
 
     if (clisock == nullptr)
     {
@@ -1037,23 +1051,8 @@ static php_stream *socket_create(
     return stream;
 }
 
-static void init_function()
-{
-    if (function_table)
-    {
-        return;
-    }
-    function_table = (zend_array*) emalloc(sizeof(zend_array));
-    zend_hash_init(function_table, 8, NULL, NULL, 0);
-}
-
 bool PHPCoroutine::enable_hook(int flags)
 {
-    if (sw_unlikely(enable_strict_mode))
-    {
-        php_swoole_fatal_error(E_ERROR, "unable to enable the coroutine mode after you enable the strict mode");
-        return false;
-    }
     if (!hook_init)
     {
         HashTable *xport_hash = php_stream_xport_get_hash();
@@ -1068,7 +1067,8 @@ bool PHPCoroutine::enable_hook(int flags)
         // file
         memcpy((void*) &ori_php_plain_files_wrapper, &php_plain_files_wrapper, sizeof(php_plain_files_wrapper));
 
-        init_function();
+        function_table = (zend_array*) emalloc(sizeof(zend_array));
+        zend_hash_init(function_table, 8, NULL, NULL, 0);
 
         hook_init = true;
     }
@@ -1155,7 +1155,11 @@ bool PHPCoroutine::enable_hook(int flags)
     {
         if (hook_flags & SW_HOOK_SSL)
         {
-            php_stream_xport_register("ssl", ori_factory.ssl);
+            if (ori_factory.ssl != nullptr) {
+                php_stream_xport_register("ssl", ori_factory.ssl);
+            } else {
+                php_stream_xport_unregister("ssl");
+            }
         }
     }
     if (flags & SW_HOOK_TLS)
@@ -1172,7 +1176,14 @@ bool PHPCoroutine::enable_hook(int flags)
     {
         if (hook_flags & SW_HOOK_TLS)
         {
-            php_stream_xport_register("tls", ori_factory.tls);
+            if (ori_factory.tls != nullptr)
+            {
+                php_stream_xport_register("tls", ori_factory.tls);
+            }
+            else
+            {
+                php_stream_xport_unregister("tls");
+            }
         }
     }
     if (flags & SW_HOOK_STREAM_FUNCTION)
@@ -1263,8 +1274,8 @@ bool PHPCoroutine::enable_hook(int flags)
         if (hook_flags & SW_HOOK_BLOCKING_FUNCTION)
         {
             SW_UNHOOK_FUNC(gethostbyname);
-            unhook_func(ZEND_STRL("exec"));
-            unhook_func(ZEND_STRL("shell_exec"));
+            SW_UNHOOK_FUNC(exec);
+            SW_UNHOOK_FUNC(shell_exec);
         }
     }
 
@@ -1274,39 +1285,34 @@ bool PHPCoroutine::enable_hook(int flags)
         {
             hook_func(ZEND_STRL("curl_init"));
             hook_func(ZEND_STRL("curl_setopt"));
-            hook_func(ZEND_STRL("curl_exec"));
-            hook_func(ZEND_STRL("curl_multi_getcontent"));
             hook_func(ZEND_STRL("curl_setopt_array"));
-            hook_func(ZEND_STRL("curl_error"));
+            hook_func(ZEND_STRL("curl_exec"));
             hook_func(ZEND_STRL("curl_getinfo"));
             hook_func(ZEND_STRL("curl_errno"));
-            hook_func(ZEND_STRL("curl_close"));
+            hook_func(ZEND_STRL("curl_error"));
             hook_func(ZEND_STRL("curl_reset"));
+            hook_func(ZEND_STRL("curl_close"));
+            hook_func(ZEND_STRL("curl_multi_getcontent"));
         }
     }
     else
     {
         if (hook_flags & SW_HOOK_CURL)
         {
-            unhook_func(ZEND_STRL("curl_init"));
-            unhook_func(ZEND_STRL("curl_setopt"));
-            unhook_func(ZEND_STRL("curl_exec"));
-            unhook_func(ZEND_STRL("curl_setopt_array"));
-            unhook_func(ZEND_STRL("curl_error"));
-            unhook_func(ZEND_STRL("curl_getinfo"));
-            unhook_func(ZEND_STRL("curl_errno"));
-            unhook_func(ZEND_STRL("curl_close"));
-            unhook_func(ZEND_STRL("curl_reset"));
+            SW_UNHOOK_FUNC(curl_init);
+            SW_UNHOOK_FUNC(curl_setopt);
+            SW_UNHOOK_FUNC(curl_setopt_array);
+            SW_UNHOOK_FUNC(curl_exec);
+            SW_UNHOOK_FUNC(curl_getinfo);
+            SW_UNHOOK_FUNC(curl_errno);
+            SW_UNHOOK_FUNC(curl_error);
+            SW_UNHOOK_FUNC(curl_reset);
+            SW_UNHOOK_FUNC(curl_close);
+            SW_UNHOOK_FUNC(curl_multi_getcontent);
         }
     }
 
     hook_flags = flags;
-    return true;
-}
-
-bool PHPCoroutine::inject_function()
-{
-    init_function();
     return true;
 }
 
@@ -1318,7 +1324,7 @@ bool PHPCoroutine::disable_hook()
 static PHP_METHOD(swoole_runtime, enableCoroutine)
 {
     zval *zflags = nullptr;
-    /*TODO: enable SW_HOOK_CURL by default after curl handler completed */
+    /*TODO:[v4.6] enable SW_HOOK_CURL by default after curl handler completed */
     zend_long flags = SW_HOOK_ALL;
 
     ZEND_PARSE_PARAMETERS_START(0, 2)
@@ -1353,6 +1359,17 @@ static PHP_METHOD(swoole_runtime, enableCoroutine)
 static PHP_METHOD(swoole_runtime, getHookFlags)
 {
     RETURN_LONG(hook_flags);
+}
+
+static PHP_METHOD(swoole_runtime, setHookFlags)
+{
+    zend_long flags = SW_HOOK_ALL;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(flags)
+    ZEND_PARSE_PARAMETERS_END_EX(RETURN_FALSE);
+
+    RETURN_BOOL(PHPCoroutine::enable_hook(flags));
 }
 
 static PHP_FUNCTION(swoole_sleep)
@@ -1529,7 +1546,8 @@ static void stream_array_to_fd_set(zval *stream_array, std::unordered_map<int, s
         {
             i->second.events |= event;
         }
-    } ZEND_HASH_FOREACH_END();
+    }
+    ZEND_HASH_FOREACH_END();
 }
 
 static int stream_array_emulate_read_fd_set(zval *stream_array)
@@ -1842,7 +1860,7 @@ static PHP_FUNCTION(swoole_user_func_handler)
     zend_fcall_info fci;
     fci.size = sizeof(fci);
     fci.object = NULL;
-    fci.function_name = {{0}};
+    fci.function_name = {};
     fci.retval = return_value;
     fci.param_count = ZEND_NUM_ARGS();
     fci.params = ZEND_CALL_ARG(execute_data, 1);

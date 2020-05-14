@@ -33,6 +33,7 @@ static int swFactoryProcess_finish(swFactory *factory, swSendData *data);
 static int swFactoryProcess_shutdown(swFactory *factory);
 static int swFactoryProcess_end(swFactory *factory, int fd);
 static void swFactoryProcess_free(swFactory *factory);
+static int swFactoryProcess_create_pipes(swFactory *factory);
 
 static int process_send_packet(swServer *serv, swPipeBuffer *buf, swSendData *resp, send_func_t _send, void* private_data);
 static int process_sendto_worker(swServer *serv, swPipeBuffer *buf, size_t n, void *private_data);
@@ -90,11 +91,11 @@ static void swFactoryProcess_free(swFactory *factory)
     }
     sw_free(serv->pipe_buffers);
 
-    if (serv->stream_socket)
+    if (serv->stream_socket_file)
     {
-        unlink(serv->stream_socket);
-        close(serv->stream_fd);
-        sw_free(serv->stream_socket);
+        unlink(serv->stream_socket_file);
+        sw_free(serv->stream_socket_file);
+        swSocket_free(serv->stream_socket);
     }
 
     for (i = 0; i < serv->worker_num; i++)
@@ -103,39 +104,9 @@ static void swFactoryProcess_free(swFactory *factory)
     }
 }
 
-static int swFactoryProcess_start(swFactory *factory)
+static int swFactoryProcess_create_pipes(swFactory *factory)
 {
-    uint32_t i;
     swServer *serv = (swServer *) factory->ptr;
-
-    if (serv->dispatch_mode == SW_DISPATCH_STREAM)
-    {
-        serv->stream_socket = swoole_string_format(64, "/tmp/swoole.%d.sock", serv->gs->master_pid);
-        if (serv->stream_socket == NULL)
-        {
-            return SW_ERR;
-        }
-        int _reuse_port = SwooleG.reuse_port;
-        SwooleG.reuse_port = 0;
-        serv->stream_fd = swSocket_create_server(SW_SOCK_UNIX_STREAM, serv->stream_socket, 0, 2048);
-        if (serv->stream_fd < 0)
-        {
-            return SW_ERR;
-        }
-        swoole_fcntl_set_option(serv->stream_fd, 1, 1);
-        SwooleG.reuse_port = _reuse_port;
-    }
-
-    for (i = 0; i < serv->worker_num; i++)
-    {
-        if (swServer_worker_create(serv, swServer_get_worker(serv, i)) < 0)
-        {
-            return SW_ERR;
-        }
-    }
-
-    serv->reactor_pipe_num = serv->worker_num / serv->reactor_num;
-
     swFactoryProcess *object = (swFactoryProcess *) serv->factory.object;
 
     object->pipes = (swPipe *) sw_calloc(serv->worker_num, sizeof(swPipe));
@@ -145,59 +116,74 @@ static int swFactoryProcess_start(swFactory *factory)
         return SW_ERR;
     }
 
-    for (i = 0; i < serv->worker_num; i++)
+    for (uint32_t i = 0; i < serv->worker_num; i++)
     {
+        int kernel_buffer_size = SW_UNIXSOCK_MAX_BUF_SIZE;
+
         if (swPipeUnsock_create(&object->pipes[i], 1, SOCK_DGRAM) < 0)
         {
             sw_free(object->pipes);
             object->pipes = NULL;
             return SW_ERR;
         }
-        serv->workers[i].pipe_master = object->pipes[i].getFd(&object->pipes[i], SW_PIPE_MASTER);
-        serv->workers[i].pipe_worker = object->pipes[i].getFd(&object->pipes[i], SW_PIPE_WORKER);
 
-        int kernel_buffer_size = SW_UNIXSOCK_MAX_BUF_SIZE;
-        setsockopt(serv->workers[i].pipe_master, SOL_SOCKET, SO_SNDBUF, &kernel_buffer_size, sizeof(kernel_buffer_size));
-        setsockopt(serv->workers[i].pipe_worker, SOL_SOCKET, SO_SNDBUF, &kernel_buffer_size, sizeof(kernel_buffer_size));
+        serv->workers[i].pipe_master = object->pipes[i].getSocket(&object->pipes[i], SW_PIPE_MASTER);
+        serv->workers[i].pipe_worker = object->pipes[i].getSocket(&object->pipes[i], SW_PIPE_WORKER);
+        
+        setsockopt(serv->workers[i].pipe_master->fd, SOL_SOCKET, SO_SNDBUF, &kernel_buffer_size, sizeof(kernel_buffer_size));
+        setsockopt(serv->workers[i].pipe_worker->fd, SOL_SOCKET, SO_SNDBUF, &kernel_buffer_size, sizeof(kernel_buffer_size));
 
         serv->workers[i].pipe_object = &object->pipes[i];
         swServer_store_pipe_fd(serv, serv->workers[i].pipe_object);
     }
 
-#ifdef HAVE_KQUEUE
-    serv->ipc_max_size = SW_IPC_MAX_SIZE;
-#else
-    int bufsize;
-    socklen_t _len = sizeof(bufsize);
-    /**
-     * Get the maximum ipc[unix socket with dgram] transmission length
-     */
-    if (getsockopt(serv->workers[0].pipe_master, SOL_SOCKET, SO_SNDBUF, &bufsize, &_len) != 0)
+    return SW_OK;
+}
+
+static int swFactoryProcess_start(swFactory *factory)
+{
+    swServer *serv = (swServer *) factory->ptr;
+    swFactoryProcess *object = (swFactoryProcess *) serv->factory.object;
+
+    if (serv->dispatch_mode == SW_DISPATCH_STREAM)
     {
-        bufsize = SW_IPC_MAX_SIZE;
-    }
-    // - dgram header [32 byte]
-    serv->ipc_max_size = bufsize - 32;
-#endif
-    /**
-     * alloc memory
-     */
-    serv->pipe_buffers = (swPipeBuffer **) sw_calloc(serv->reactor_num, sizeof(swPipeBuffer *));
-    if (serv->pipe_buffers == NULL)
-    {
-        swSysError("malloc[buffers] failed");
-        return SW_ERR;
-    }
-    for (i = 0; i < serv->reactor_num; i++)
-    {
-        serv->pipe_buffers[i] = (swPipeBuffer *) sw_malloc(serv->ipc_max_size);
-        if (serv->pipe_buffers[i] == NULL)
+        serv->stream_socket_file = swoole_string_format(64, "/tmp/swoole.%d.sock", serv->gs->master_pid);
+        if (serv->stream_socket_file == NULL)
         {
-            swSysError("malloc[sndbuf][%d] failed", i);
             return SW_ERR;
         }
-        bzero(serv->pipe_buffers[i], sizeof(swDataHead));
+        swSocket *sock = swSocket_create_server(SW_SOCK_UNIX_STREAM, serv->stream_socket_file, 0, 2048);
+        if (sock == nullptr)
+        {
+            return SW_ERR;
+        }
+        serv->stream_socket = sock;
+        swoole_fcntl_set_option(sock->fd, 1, 1);
+        serv->stream_socket->nonblock = 1;
+        serv->stream_socket->cloexec = 1;
     }
+
+    for (uint32_t i = 0; i < serv->worker_num; i++)
+    {
+        if (swServer_worker_create(serv, swServer_get_worker(serv, i)) < 0)
+        {
+            return SW_ERR;
+        }
+    }
+
+    serv->reactor_pipe_num = serv->worker_num / serv->reactor_num;
+
+    if (swFactoryProcess_create_pipes(factory) < 0)
+    {
+        return SW_ERR;
+    }
+
+    swServer_set_ipc_max_size(serv);
+    if (swServer_create_pipe_buffers(serv) < 0)
+    {
+        return SW_ERR;
+    }
+    
     object->send_buffer = (swPipeBuffer *) sw_malloc(serv->ipc_max_size);
     if (object->send_buffer == NULL)
     {
@@ -236,7 +222,7 @@ static int process_sendto_worker(swServer *serv, swPipeBuffer *buf, size_t n, vo
 
 static int process_sendto_reactor(swServer *serv, swPipeBuffer *buf, size_t n, void *private_data)
 {
-    return swWorker_send2reactor(serv, (swEventData *) buf, sizeof(buf->info) + buf->info.len,
+    return swWorker_send2reactor(serv, (swEventData *) buf, n,
             ((swConnection *) private_data)->session_id);
 }
 
@@ -309,11 +295,17 @@ static int swFactoryProcess_dispatch(swFactory *factory, swSendData *task)
     return process_send_packet(serv, buf, task, process_sendto_worker, worker);
 }
 
+/**
+ * @description: master process send data to worker process.
+ *  If the data sent is larger than swServer::ipc_max_size, then it is sent in chunks. Otherwise send it directly。
+ * @return: send success returns SW_OK, send failure returns SW_ERR.
+ */
 static int process_send_packet(swServer *serv, swPipeBuffer *buf, swSendData *resp, send_func_t _send, void* private_data)
 {
     const char* data = resp->data;
     uint32_t send_n = resp->info.len;
     off_t offset = 0;
+    uint32_t copy_n;
 
     uint32_t max_length = serv->ipc_max_size - sizeof(buf->info);
 
@@ -331,31 +323,32 @@ static int process_send_packet(swServer *serv, swPipeBuffer *buf, swSendData *re
             goto _ipc_use_chunk;
         }
 #endif
-        return retval;
+        return retval < 0 ? SW_ERR : SW_OK;
     }
 
 #ifdef __linux__
     _ipc_use_chunk:
 #endif
     buf->info.flags = SW_EVENT_DATA_CHUNK;
+    buf->info.len = send_n;
 
     while (send_n > 0)
     {
         if (send_n > max_length)
         {
-            buf->info.len = max_length;
+            copy_n = max_length;
         }
         else
         {
             buf->info.flags |= SW_EVENT_DATA_END;
-            buf->info.len = send_n;
+            copy_n = send_n;
         }
 
-        memcpy(buf->data, data + offset, buf->info.len);
+        memcpy(buf->data, data + offset, copy_n);
 
-        swTrace("finish, type=%d|len=%d", buf->info.type, buf->info.len);
+        swTrace("finish, type=%d|len=%d", buf->info.type, copy_n);
 
-        if (_send(serv, buf, sizeof(buf->info) + buf->info.len, private_data) < 0)
+        if (_send(serv, buf, sizeof(buf->info) + copy_n, private_data) < 0)
         {
 #ifdef __linux__
             if (errno == ENOBUFS && max_length > SW_BUFFER_SIZE_STD)
@@ -367,8 +360,8 @@ static int process_send_packet(swServer *serv, swPipeBuffer *buf, swSendData *re
             return SW_ERR;
         }
 
-        send_n -= buf->info.len;
-        offset += buf->info.len;
+        send_n -= copy_n;
+        offset += copy_n;
     }
 
     return SW_OK;
@@ -397,13 +390,13 @@ static int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
     /**
      * More than the output buffer
      */
-    if (resp->info.len > serv->buffer_output_size)
+    if (resp->info.len > serv->output_buffer_size)
     {
         swoole_error_log(
             SW_LOG_WARNING, SW_ERROR_DATA_LENGTH_TOO_LARGE,
             "The length of data [%u] exceeds the output buffer size[%u], "
-            "please use the sendfile, chunked transfer mode or adjust the buffer_output_size",
-            resp->info.len, serv->buffer_output_size
+            "please use the sendfile, chunked transfer mode or adjust the output_buffer_size",
+            resp->info.len, serv->output_buffer_size
         );
         return SW_ERR;
     }
@@ -433,7 +426,7 @@ static int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
     {
         if (serv->send_yield && process_is_supported_send_yield(serv, conn))
         {
-            SwooleG.error = SW_ERROR_OUTPUT_SEND_YIELD;
+            swoole_set_last_error(SW_ERROR_OUTPUT_SEND_YIELD);
         }
         else
         {
@@ -446,19 +439,19 @@ static int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
     /**
      * stream
      */
-    if (serv->last_stream_fd > 0)
+    if (serv->last_stream_socket)
     {
         int _len = resp->info.len;
         int _header = htonl(_len + sizeof(resp->info));
-        if (SwooleTG.reactor->write(SwooleTG.reactor, serv->last_stream_fd, (char*) &_header, sizeof(_header)) < 0)
+        if (SwooleTG.reactor->write(SwooleTG.reactor, serv->last_stream_socket, (char*) &_header, sizeof(_header)) < 0)
         {
             return SW_ERR;
         }
-        if (SwooleTG.reactor->write(SwooleTG.reactor, serv->last_stream_fd, &resp->info, sizeof(resp->info)) < 0)
+        if (SwooleTG.reactor->write(SwooleTG.reactor, serv->last_stream_socket, &resp->info, sizeof(resp->info)) < 0)
         {
             return SW_ERR;
         }
-        if (SwooleTG.reactor->write(SwooleTG.reactor, serv->last_stream_fd, resp->data, _len) < 0)
+        if (SwooleTG.reactor->write(SwooleTG.reactor, serv->last_stream_socket, resp->data, _len) < 0)
         {
             return SW_ERR;
         }
@@ -480,8 +473,8 @@ static int swFactoryProcess_finish(swFactory *factory, swSendData *resp)
 static int swFactoryProcess_end(swFactory *factory, int fd)
 {
     swServer *serv = (swServer *) factory->ptr;
-    swSendData _send = {{0}};
-    swDataHead info = {0};
+    swSendData _send = {};
+    swDataHead info = {};
 
     _send.info.fd = fd;
     _send.info.len = 0;
@@ -490,7 +483,7 @@ static int swFactoryProcess_end(swFactory *factory, int fd)
     swConnection *conn = swWorker_get_connection(serv, fd);
     if (conn == NULL || conn->active == 0)
     {
-        SwooleG.error = SW_ERROR_SESSION_NOT_EXIST;
+        swoole_set_last_error(SW_ERROR_SESSION_NOT_EXIST);
         return SW_ERR;
     }
     else if (conn->close_force)

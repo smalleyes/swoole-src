@@ -73,7 +73,7 @@ static sw_inline scheduler_t* scheduler_get_object(zend_object *obj)
 
 static zend_object *scheduler_create_object(zend_class_entry *ce)
 {
-    scheduler_t *s = (scheduler_t *) ecalloc(1, sizeof(scheduler_t) + zend_object_properties_size(ce));
+    scheduler_t *s = (scheduler_t *) zend_object_alloc(sizeof(scheduler_t), ce);
     zend_object_std_init(&s->std, ce);
     object_properties_init(&s->std, ce);
     s->std.handlers = &swoole_coroutine_scheduler_handlers;
@@ -117,8 +117,28 @@ void php_swoole_coroutine_scheduler_minit(int module_number)
     SW_SET_CLASS_CREATE_WITH_ITS_OWN_HANDLERS(swoole_coroutine_scheduler);
     SW_SET_CLASS_CUSTOM_OBJECT(swoole_coroutine_scheduler, scheduler_create_object, scheduler_free_object, scheduler_t, std);
     swoole_coroutine_scheduler_ce->ce_flags |= ZEND_ACC_FINAL;
+}
 
-    zend_declare_property_null(swoole_coroutine_scheduler_ce, ZEND_STRL("_list"), ZEND_ACC_PRIVATE);
+static zend_fcall_info_cache exit_condition_fci_cache;
+static bool exit_condition_cleaner;
+
+static int php_swoole_coroutine_reactor_can_exit(swReactor *reactor)
+{
+    zval retval;
+    int success;
+
+    SW_ASSERT(exit_condition_fci_cache.function_handler);
+    ZVAL_NULL(&retval);
+    success = sw_zend_call_function_ex(NULL, &exit_condition_fci_cache, 0, nullptr, &retval);
+    if (UNEXPECTED(success != SUCCESS))
+    {
+        php_swoole_fatal_error(E_ERROR, "Coroutine can_exit callback handler error");
+    }
+    if (UNEXPECTED(EG(exception)))
+    {
+        zend_exception_error(EG(exception), E_ERROR);
+    }
+    return !(Z_TYPE_P(&retval) == IS_FALSE);
 }
 
 PHP_METHOD(swoole_coroutine_scheduler, set)
@@ -132,6 +152,8 @@ PHP_METHOD(swoole_coroutine_scheduler, set)
     ZEND_PARSE_PARAMETERS_END_EX(RETURN_FALSE);
 
     vht = Z_ARRVAL_P(zset);
+    php_swoole_set_global_option(vht);
+
     if (php_swoole_array_get_value(vht, "max_coroutine", ztmp))
     {
         zend_long max_num = zval_get_long(ztmp);
@@ -141,9 +163,18 @@ PHP_METHOD(swoole_coroutine_scheduler, set)
     {
         PHPCoroutine::config.hook_flags = zval_get_long(ztmp);
     }
+    if (php_swoole_array_get_value(vht, "enable_preemptive_scheduler", ztmp))
+    {
+        PHPCoroutine::config.enable_preemptive_scheduler = zval_is_true(ztmp);
+    }
     if (php_swoole_array_get_value(vht, "c_stack_size", ztmp) || php_swoole_array_get_value(vht, "stack_size", ztmp))
     {
         Coroutine::set_stack_size(zval_get_long(ztmp));
+    }
+    if (php_swoole_array_get_value(vht, "socket_dns_timeout", ztmp))
+    {
+        double t = zval_get_double(ztmp);
+        if (t != 0) { Socket::default_dns_timeout = t; }
     }
     if (php_swoole_array_get_value(vht, "socket_connect_timeout", ztmp))
     {
@@ -165,15 +196,7 @@ PHP_METHOD(swoole_coroutine_scheduler, set)
         double t = zval_get_double(ztmp);
         if (t != 0) { Socket::default_write_timeout = t; }
     }
-    if (php_swoole_array_get_value(vht, "log_level", ztmp))
-    {
-        zend_long level = zval_get_long(ztmp);
-        SwooleG.log_level = (uint32_t) (level < 0 ? UINT32_MAX : level);
-    }
-    if (php_swoole_array_get_value(vht, "trace_flags", ztmp))
-    {
-        SwooleG.trace_flags = (uint32_t) SW_MAX(0, zval_get_long(ztmp));
-    }
+
     if (php_swoole_array_get_value(vht, "dns_cache_expire", ztmp))
     {
         System::set_dns_cache_expire((time_t) zval_get_long(ztmp));
@@ -181,18 +204,6 @@ PHP_METHOD(swoole_coroutine_scheduler, set)
     if (php_swoole_array_get_value(vht, "dns_cache_capacity", ztmp))
     {
         System::set_dns_cache_capacity((size_t) zval_get_long(ztmp));
-    }
-    if (php_swoole_array_get_value(vht, "dns_server", ztmp))
-    {
-        if (SwooleG.dns_server_v4)
-        {
-            sw_free(SwooleG.dns_server_v4);
-        }
-        SwooleG.dns_server_v4 = zend::string(ztmp).dup();
-    }
-    if (php_swoole_array_get_value(vht, "display_errors", ztmp))
-    {
-        SWOOLE_G(display_errors) = zval_is_true(ztmp);
     }
     /* AIO */
     if (php_swoole_array_get_value(vht, "aio_core_worker_num", ztmp))
@@ -214,6 +225,53 @@ PHP_METHOD(swoole_coroutine_scheduler, set)
     if (php_swoole_array_get_value(vht, "aio_max_idle_time", ztmp))
     {
         SwooleG.aio_max_idle_time = zval_get_double(ztmp);
+    }
+    /* Reactor can exit */
+    if ((ztmp = zend_hash_str_find(vht, ZEND_STRL("exit_condition"))))
+    {
+        char *func_name;
+        if (exit_condition_fci_cache.function_handler)
+        {
+            sw_zend_fci_cache_discard(&exit_condition_fci_cache);
+            exit_condition_fci_cache.function_handler = nullptr;
+        }
+        if (!ZVAL_IS_NULL(ztmp))
+        {
+            if (!sw_zend_is_callable_ex(ztmp, NULL, 0, &func_name, NULL, &exit_condition_fci_cache, NULL))
+            {
+                php_swoole_fatal_error(E_ERROR, "exit_condition '%s' is not callable", func_name);
+            }
+            else
+            {
+                efree(func_name);
+                sw_zend_fci_cache_persist(&exit_condition_fci_cache);
+                if (!exit_condition_cleaner)
+                {
+                    php_swoole_register_rshutdown_callback([](void *data)
+                    {
+                        if (exit_condition_fci_cache.function_handler)
+                        {
+                            sw_zend_fci_cache_discard(&exit_condition_fci_cache);
+                            exit_condition_fci_cache.function_handler = nullptr;
+                        }
+                    }, nullptr);
+                    exit_condition_cleaner = true;
+                }
+                SwooleG.reactor_can_exit = php_swoole_coroutine_reactor_can_exit;
+                if (SwooleTG.reactor)
+                {
+                    SwooleTG.reactor->can_exit = php_swoole_coroutine_reactor_can_exit;
+                }
+            }
+        }
+        else
+        {
+            SwooleG.reactor_can_exit = nullptr;
+            if (SwooleTG.reactor)
+            {
+                SwooleTG.reactor->can_exit = nullptr;
+            }
+        }
     }
 }
 

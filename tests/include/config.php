@@ -1,4 +1,12 @@
 <?php
+/**
+ * This file is part of Swoole, for internal use only
+ *
+ * @link     https://www.swoole.com
+ * @contact  team@swoole.com
+ * @license  https://github.com/swoole/library/blob/master/LICENSE
+ */
+
 require_once __DIR__ . '/functions.php';
 
 /** ============== Env =============== */
@@ -19,6 +27,7 @@ define('TEST_LOG_FILE', '/tmp/swoole.log');
 define('TEST_PID_FILE', '/tmp/swoole.pid');
 define('SSL_FILE_DIR', __DIR__ . '/api/swoole_http_server/localhost-ssl');
 define('SSL_FILE_DIR2', __DIR__ . '/../include/api/ssl-ca');
+define('DOCUMENT_ROOT', __DIR__ . '/../../examples/www');
 
 /** ============ Servers ============ */
 define('SERVER_MODE_RANDOM', array_random([SWOOLE_BASE, SWOOLE_PROCESS]));
